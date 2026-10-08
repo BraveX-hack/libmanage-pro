@@ -1,0 +1,5 @@
+{
+  "name": "BiblioTech - Gestion de Bibliothèque Universitaire",
+  "description": "Plateforme moderne de gestion de bibliothèque numérique : catalogue de livres, gestion des étudiants, emprunts, retours, réservations avec quittance officielle et espace administration sécurisé.",
+  "requestFramePermissions": []
+}
