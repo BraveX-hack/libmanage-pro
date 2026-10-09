@@ -8,7 +8,9 @@ interface AuthModalProps {
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
-  const { loginUser, registerUser } = useLibrary();
+  const { loginUser, registerUser, resendVerificationEmail } = useLibrary();
+  // Adresse à laquelle le lien de vérification vient d'être envoyé (affiche l'écran « vérifiez votre boîte mail »)
+  const [sentTo, setSentTo] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [mode, setMode] = useState<'login' | 'register'>('login');
 
@@ -72,9 +74,41 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
 
     if (success) {
       setRegPassword('');
-      onClose();
+      setSentTo(regEmail.trim().toLowerCase());
     }
   };
+
+  const handleResend = async () => {
+    if (!sentTo || isSubmitting) return;
+    setIsSubmitting(true);
+    try {
+      await resendVerificationEmail(sentTo);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const googleButton = (
+    <>
+      <div className="flex items-center gap-3 text-[11px] text-slate-400">
+        <div className="flex-1 border-t border-slate-200" />
+        <span>ou</span>
+        <div className="flex-1 border-t border-slate-200" />
+      </div>
+      <a
+        href="/api/auth/google"
+        className="w-full py-2.5 border border-slate-300 hover:bg-slate-50 text-slate-800 font-semibold rounded-xl transition-colors flex items-center justify-center gap-2"
+      >
+        <svg className="w-4 h-4" viewBox="0 0 48 48" aria-hidden="true">
+          <path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.9 6.1C12.4 13.6 17.7 9.5 24 9.5z" />
+          <path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.5 5.8c4.4-4.1 7.1-10.1 7.1-17.5z" />
+          <path fill="#FBBC05" d="M10.5 28.7a14.5 14.5 0 0 1 0-9.4l-7.9-6.1a24 24 0 0 0 0 21.6l7.9-6.1z" />
+          <path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.5-5.8c-2.1 1.4-4.8 2.3-8.4 2.3-6.3 0-11.6-4.1-13.5-9.9l-7.9 6.1C6.5 42.6 14.6 48 24 48z" />
+        </svg>
+        Continuer avec Google
+      </a>
+    </>
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-xs animate-in fade-in duration-200">
@@ -169,7 +203,42 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
               >
                 Connexion Sécurisée
               </button>
+              {googleButton}
             </form>
+          ) : sentTo ? (
+            <div className="space-y-4 text-xs text-center">
+              <Mail className="w-10 h-10 mx-auto text-amber-600" />
+              <h3 className="font-serif font-bold text-slate-900 text-base">Vérifiez votre boîte mail</h3>
+              <p className="text-slate-600 leading-relaxed">
+                Un lien de confirmation a été envoyé à <strong>{sentTo}</strong>. Cliquez dessus pour activer votre compte
+                (valable 24 h). Pensez à regarder dans vos courriers indésirables.
+              </p>
+              <button
+                type="button"
+                onClick={handleResend}
+                disabled={isSubmitting}
+                className="w-full py-2.5 border border-slate-300 hover:bg-slate-50 text-slate-800 font-semibold rounded-xl transition-colors"
+              >
+                Renvoyer l'e-mail
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSentTo(null);
+                  setMode('login');
+                }}
+                className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-semibold rounded-xl transition-colors shadow-xs"
+              >
+                J'ai confirmé mon e-mail : me connecter
+              </button>
+              <button
+                type="button"
+                onClick={() => setSentTo(null)}
+                className="text-[11px] text-slate-400 hover:text-slate-600 underline underline-offset-2"
+              >
+                Adresse incorrecte ? Modifier l'inscription
+              </button>
+            </div>
           ) : (
             <form onSubmit={handleRegisterSubmit} className="space-y-3.5 text-xs">
               <div className="grid grid-cols-2 gap-3">
@@ -353,8 +422,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                 </button>
               </div>
 
+              {googleButton}
+
               <p className="text-[10px] text-slate-400 text-center">
-                Une carte d'étudiant numérique unique sera immédiatement attribuée pour le groupe 2GroupESGIS.
+                Un e-mail de confirmation vous sera envoyé : votre carte d'étudiant numérique 2GroupESGIS est attribuée dès que vous avez cliqué sur le lien.
               </p>
             </form>
           )}

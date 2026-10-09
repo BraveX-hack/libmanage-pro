@@ -21,11 +21,14 @@ import {
   getSessionSecret,
   getSessionToken,
   hashPassword,
+  parseCookies,
   readSession,
   setSessionCookie,
   signSession,
   verifyPassword,
 } from './auth';
+import { buildAuthUrl as buildGoogleAuthUrl, fetchGoogleProfile, isGoogleConfigured } from './google';
+import { describeMailError, sendMail, verificationEmail, mailMode } from './mailer';
 import { checkSession, createCheckoutSession, isBachsConfigured, reservationProduct, toBachsAmount } from './bachs';
 import { Database, DATA_DIR, DB_FILE, mutate, nextCounter, read, resetToDemo, todayISO } from './store';
 
@@ -96,7 +99,7 @@ const DAILY_LATE_FEE = 200;
 const isStaff = (u?: User | null) => !!u && (u.role === 'admin' || u.role === 'super_admin');
 
 const publicUser = (u: User): PublicUser => {
-  const { passwordHash: _p, legacyDemoPassword: _l, ...rest } = u;
+  const { passwordHash: _p, legacyDemoPassword: _l, googleId: _g, ...rest } = u;
   return rest;
 };
 
@@ -316,9 +319,89 @@ export const createApiRouter = (): Router => {
   // ------------------------------------------------------
   // Authentification
   // ------------------------------------------------------
+  // ---- Création d'un compte étudiant (utilisée après vérification d'e-mail ou via Google) ----
+  const createStudentAccount = (
+    data: Database,
+    f: {
+      email: string;
+      lastName: string;
+      firstName: string;
+      school: string;
+      academicLevel: string;
+      filiere: string;
+      birthDate: string;
+      nationalIdCard?: string;
+      passwordHash: string;
+      googleId?: string;
+      avatar?: string;
+    }
+  ): User => {
+    let card = '';
+    do {
+      card = `ETU-${new Date().getFullYear()}-${nextCounter(data, 'student', 1000)}`;
+    } while (data.users.some((u) => u.studentCardNumber === card));
+    const created: User = {
+      id: newId('user'),
+      name: `${f.lastName} ${f.firstName}`.trim(),
+      firstName: f.firstName,
+      email: f.email,
+      role: 'etudiant',
+      studentCardNumber: card,
+      nationalIdCard: f.nationalIdCard || `CIP-${crypto.randomInt(1000000000, 9999999999)}`,
+      birthDate: f.birthDate,
+      school: f.school,
+      academicLevel: f.academicLevel,
+      filiere: f.filiere,
+      faculty: `${f.school} — ${f.academicLevel} (${f.filiere})`,
+      subscriptionPlan: 'Gratuit',
+      maxLoans: PLAN_PRICES.Gratuit.maxLoans,
+      status: 'actif',
+      joinedDate: todayISO(),
+      passwordHash: f.passwordHash,
+      googleId: f.googleId,
+      avatar: f.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
+    };
+    data.users.push(created);
+    return created;
+  };
+
+  const appUrl = (): string => {
+    const configured = (process.env.APP_PUBLIC_URL || '').replace(/\/+$/, '');
+    if (configured) return configured;
+    if (isProd) fail(500, 'APP_PUBLIC_URL doit être défini en production (adresse publique du site).');
+    return `http://localhost:${process.env.PORT || 3000}`;
+  };
+
+  const VERIFY_HOURS = 24;
+  const RESEND_DELAY_MS = 120 * 1000;
+  const sha256hex = (v: string) => crypto.createHash('sha256').update(v).digest('hex');
+
+  /** Génère un nouveau jeton pour l'inscription en attente et envoie le lien ; en cas d'échec, lève le délai anti-spam. */
+  const sendVerification = async (email: string, firstName: string): Promise<void> => {
+    const token = crypto.randomBytes(32).toString('hex');
+    mutate((data) => {
+      const p = data.pendingRegistrations.find((x) => x.email === email)!;
+      p.tokenHash = sha256hex(token); // seule l'empreinte est stockée
+      p.expiresAt = new Date(Date.now() + VERIFY_HOURS * 3600 * 1000).toISOString();
+      p.lastSentAt = new Date().toISOString();
+    });
+    const link = `${appUrl()}/api/auth/verify-email?token=${token}`;
+    try {
+      await sendMail(verificationEmail({ to: email, firstName, link, hours: VERIFY_HOURS }));
+    } catch (err) {
+      const reason = describeMailError(err);
+      console.error('[BiblioTech] Échec d\'envoi du mail de vérification :', reason, '| détail :', (err as Error).message);
+      mutate((data) => {
+        const p = data.pendingRegistrations.find((x) => x.email === email);
+        if (p) p.lastSentAt = new Date(0).toISOString();
+      });
+      fail(502, `Impossible d'envoyer l'e-mail de vérification. Vérifiez l'adresse ou réessayez plus tard.${isProd ? '' : ' (' + reason + ')'}`);
+    }
+  };
+
   router.post(
     '/auth/register',
-    wrap((req, res) => {
+    wrapAsync(async (req, res) => {
       if (!registerLimiter.hit(clientIp(req))) fail(429, 'Trop d\'inscriptions depuis cette adresse. Réessayez plus tard.');
       const b = req.body || {};
       const lastName = clean(b.lastName, 60, { min: 1, label: 'Nom' });
@@ -335,43 +418,158 @@ export const createApiRouter = (): Router => {
       if (Number.isNaN(birth.getTime()) || !/^\d{4}-\d{2}-\d{2}$/.test(birthDate)) fail(400, 'Date de naissance invalide.');
       const ageYears = (Date.now() - birth.getTime()) / (365.25 * 24 * 3600 * 1000);
       if (ageYears < 14 || ageYears > 100) fail(400, 'Date de naissance invalide.');
+      if (mailMode() === 'none') fail(503, 'L\'envoi d\'e-mails n\'est pas configuré : inscription impossible pour le moment.');
 
-      const user = mutate((data) => {
+      // Le compte n'est PAS créé ici : l'inscription reste en attente jusqu'au clic sur le lien reçu par e-mail
+      mutate((data) => {
         if (data.users.some((u) => u.email === email)) fail(409, 'Un compte est déjà associé à cet email.');
-        let card = '';
-        do {
-          card = `ETU-${new Date().getFullYear()}-${nextCounter(data, 'student', 1000)}`;
-        } while (data.users.some((u) => u.studentCardNumber === card));
-        const nationalIdCard =
-          optionalClean(b.nationalIdCard, 40, 'Carte d\'identité') || `CIP-${crypto.randomInt(1000000000, 9999999999)}`;
-        const created: User = {
-          id: newId('user'),
-          name: `${lastName} ${firstName}`.trim(),
-          firstName,
+        const existing = data.pendingRegistrations.find((p) => p.email === email);
+        if (existing && Date.now() - new Date(existing.lastSentAt).getTime() < RESEND_DELAY_MS) {
+          fail(429, 'Un e-mail de vérification vient déjà d\'être envoyé. Patientez 2 minutes avant de réessayer.');
+        }
+        const pending = {
           email,
-          role: 'etudiant',
-          studentCardNumber: card,
-          nationalIdCard,
-          birthDate,
+          lastName,
+          firstName,
           school,
           academicLevel,
           filiere,
-          faculty: `${school} — ${academicLevel} (${filiere})`,
-          subscriptionPlan: 'Gratuit',
-          maxLoans: PLAN_PRICES.Gratuit.maxLoans,
-          status: 'actif',
-          joinedDate: todayISO(),
+          birthDate,
+          nationalIdCard: optionalClean(b.nationalIdCard, 40, 'Carte d\'identité'),
           passwordHash: hashPassword(password),
-          avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
+          tokenHash: '',
+          expiresAt: new Date(Date.now() + VERIFY_HOURS * 3600 * 1000).toISOString(),
+          lastSentAt: new Date(0).toISOString(),
         };
-        data.users.push(created);
-        logActivity(data, created, 'Nouvelle Inscription', created.name, `Carte ${card} (${academicLevel} ${filiere})`, req);
-        logVisitor(data, req, 'inscription', created, 'Inscription en ligne', `Nouvelle inscription : ${created.name} (${filiere}, ${academicLevel})`);
-        return created;
+        data.pendingRegistrations = data.pendingRegistrations.filter((p) => p.email !== email);
+        data.pendingRegistrations.push(pending);
       });
+      await sendVerification(email, firstName);
+      res.status(202).json({ success: true, pending: true, email });
+    })
+  );
 
-      setSessionCookie(req, res, signSession(user.id, secret));
-      res.status(201).json({ success: true, state: buildState(read(), user) });
+  router.post(
+    '/auth/resend-verification',
+    wrapAsync(async (req, res) => {
+      const email = clean(req.body?.email, 120, { min: 3, label: 'Email' }).toLowerCase();
+      if (!registerLimiter.hit(`resend|${clientIp(req)}`)) fail(429, 'Trop de demandes. Réessayez plus tard.');
+      const pending = read().pendingRegistrations.find((p) => p.email === email);
+      if (!pending) return fail(404, 'Aucune inscription en attente pour cette adresse (le lien a peut-être expiré : recommencez l\'inscription).');
+      if (Date.now() - new Date(pending.lastSentAt).getTime() < RESEND_DELAY_MS) {
+        return fail(429, 'Un e-mail vient d\'être envoyé. Patientez 2 minutes avant de demander un nouvel envoi.');
+      }
+      await sendVerification(email, pending.firstName);
+      res.json({ success: true });
+    })
+  );
+
+  // Destination du bouton « Vérifier mon e-mail » : c'est ici que le compte est réellement créé.
+  // Pas de connexion automatique (certains antivirus ouvrent les liens des mails) : l'utilisateur se connecte lui-même.
+  router.get(
+    '/auth/verify-email',
+    wrap((req, res) => {
+      const token = typeof req.query.token === 'string' ? req.query.token : '';
+      if (!/^[0-9a-f]{64}$/.test(token)) return res.redirect('/?email_verifie=0');
+      const hash = sha256hex(token);
+      let ok = false;
+      mutate((data) => {
+        const pending = data.pendingRegistrations.find((p) => p.tokenHash === hash && new Date(p.expiresAt).getTime() > Date.now());
+        if (!pending) return;
+        ok = true;
+        data.pendingRegistrations = data.pendingRegistrations.filter((p) => p !== pending);
+        if (data.users.some((u) => u.email === pending.email)) return; // déjà vérifié : rien à recréer
+        const created = createStudentAccount(data, pending);
+        logActivity(data, created, 'Nouvelle Inscription', created.name, `Carte ${created.studentCardNumber} — e-mail vérifié`, req);
+        logVisitor(data, req, 'inscription', created, 'Inscription en ligne', `Nouvelle inscription vérifiée : ${created.name}`);
+      });
+      res.redirect(ok ? '/?email_verifie=1' : '/?email_verifie=0');
+    })
+  );
+
+  // ------------------------------------------------------
+  // Connexion avec Google (OAuth 2.0)
+  // ------------------------------------------------------
+  const OAUTH_STATE_COOKIE = 'bt_oauth_state';
+  const googleRedirectUri = () => `${appUrl()}/api/auth/google/callback`;
+
+  router.get(
+    '/auth/google',
+    wrap((req, res) => {
+      if (!isGoogleConfigured()) return res.redirect('/?google=non_configure');
+      const state = crypto.randomBytes(16).toString('hex');
+      const secure = isProd ? '; Secure' : '';
+      res.append('Set-Cookie', `${OAUTH_STATE_COOKIE}=${state}; Path=/api/auth; HttpOnly; SameSite=Lax; Max-Age=600${secure}`);
+      res.redirect(buildGoogleAuthUrl(googleRedirectUri(), state));
+    })
+  );
+
+  router.get(
+    '/auth/google/callback',
+    wrapAsync(async (req, res) => {
+      const clearState = () => res.append('Set-Cookie', `${OAUTH_STATE_COOKIE}=; Path=/api/auth; HttpOnly; SameSite=Lax; Max-Age=0`);
+      const finish = (code: string) => {
+        clearState();
+        res.redirect(`/?google=${code}`);
+      };
+      if (!isGoogleConfigured()) return finish('non_configure');
+      if (typeof req.query.error === 'string') return finish('annule');
+
+      const cookieState = parseCookies(req.headers.cookie)[OAUTH_STATE_COOKIE] || '';
+      const state = typeof req.query.state === 'string' ? req.query.state : '';
+      const code = typeof req.query.code === 'string' ? req.query.code : '';
+      const a = Buffer.from(state);
+      const b = Buffer.from(cookieState);
+      if (!code || !state || a.length !== b.length || !crypto.timingSafeEqual(a, b)) return finish('erreur');
+
+      let profile;
+      try {
+        profile = await fetchGoogleProfile(code, googleRedirectUri());
+      } catch (err) {
+        console.error('[BiblioTech] Connexion Google échouée :', (err as Error).message);
+        return finish('erreur');
+      }
+      // Seules les adresses vérifiées par Google sont acceptées (sinon rattachement par e-mail dangereux)
+      if (!profile.emailVerified) return finish('email_non_verifie');
+
+      let outcome: 'ok' | 'suspendu' | 'conflit' = 'ok';
+      let userId = '';
+      mutate((data) => {
+        let user = data.users.find((u) => u.googleId === profile.sub) ?? data.users.find((u) => u.email === profile.email);
+        if (user) {
+          if (user.googleId && user.googleId !== profile.sub) {
+            outcome = 'conflit';
+            return;
+          }
+          if (user.status === 'suspendu') {
+            outcome = 'suspendu';
+            return;
+          }
+          user.googleId = profile.sub; // rattache le compte existant
+        } else {
+          user = createStudentAccount(data, {
+            email: profile.email,
+            lastName: profile.familyName || profile.givenName || 'Étudiant',
+            firstName: profile.givenName || '',
+            school: 'Non renseignée',
+            academicLevel: 'Non renseigné',
+            filiere: 'Non renseignée',
+            birthDate: '',
+            passwordHash: hashPassword(crypto.randomBytes(32).toString('hex')), // aucun mot de passe utilisable
+            googleId: profile.sub,
+            avatar: profile.picture,
+          });
+          logActivity(data, user, 'Nouvelle Inscription', user.name, `Carte ${user.studentCardNumber} — via Google`, req);
+        }
+        // L'e-mail est vérifié par Google : une inscription par e-mail encore en attente n'a plus lieu d'être
+        data.pendingRegistrations = data.pendingRegistrations.filter((p) => p.email !== profile.email);
+        logActivity(data, user, 'Connexion Réussie', user.email, 'Connexion avec Google', req);
+        logVisitor(data, req, 'connexion', user, 'Google', `Utilisateur connecté via Google : ${user.name}`);
+        userId = user.id;
+      });
+      if (outcome !== 'ok') return finish(outcome);
+      setSessionCookie(req, res, signSession(userId, secret));
+      finish('ok');
     })
   );
 
@@ -701,9 +899,8 @@ export const createApiRouter = (): Router => {
         for (const r of data.reservations) {
           if (r.userId === me.id && r.status === 'en_attente_paiement') r.status = 'annulee';
         }
-        for (const t of data.transactions) {
-          if (t.userId === me.id && t.kind === 'reservation' && t.status === 'en_attente') t.status = 'echec';
-        }
+        // Les anciennes transactions restent « en_attente » : si le lecteur avait déjà payé, la vérification Bachs
+        // le détectera et l'argent ne sera jamais « perdu » (livre réactivé s'il est encore libre, sinon remboursement signalé).
         sweepStock(data);
         assertCanBorrow(data, me);
 
@@ -1116,7 +1313,8 @@ export const createApiRouter = (): Router => {
     wrap((req, res) => {
       requireStaff(req);
       const data = read();
-      const safe = { ...data, users: data.users.map(publicUser) };
+      const { pendingRegistrations: _pending, ...exportable } = data; // jamais d'inscriptions en attente (hash de mot de passe)
+      const safe = { ...exportable, users: data.users.map(publicUser) };
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       res.setHeader('Content-Disposition', 'attachment; filename="BiblioTech_Database_2GroupESGIS.json"');
       res.send(JSON.stringify(safe, null, 2));

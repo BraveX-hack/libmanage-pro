@@ -113,7 +113,7 @@ export const getSessionToken = (req: Request): string | undefined => parseCookie
 
 export const setSessionCookie = (req: Request, res: Response, token: string) => {
   const secure = process.env.NODE_ENV === 'production' && (req.secure || process.env.TRUST_PROXY === '1');
-  res.setHeader(
+  res.append(
     'Set-Cookie',
     `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(
       SESSION_TTL_MS / 1000
@@ -122,7 +122,7 @@ export const setSessionCookie = (req: Request, res: Response, token: string) => 
 };
 
 export const clearSessionCookie = (res: Response) => {
-  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  res.append('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
 };
 
 // ---------- Limiteur de débit en mémoire ----------

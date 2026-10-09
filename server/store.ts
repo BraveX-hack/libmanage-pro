@@ -28,7 +28,24 @@ export const DATA_DIR = process.env.DATA_DIR
   : path.resolve(__dirname, '..', 'data');
 export const DB_FILE = path.join(DATA_DIR, 'database.json');
 
+/** Inscription en attente de confirmation par e-mail : le compte n'existe pas tant que le lien n'est pas cliqué. */
+export interface PendingRegistration {
+  email: string;
+  lastName: string;
+  firstName: string;
+  school: string;
+  academicLevel: string;
+  filiere: string;
+  birthDate: string;
+  nationalIdCard?: string;
+  passwordHash: string;
+  tokenHash: string; // seule l'empreinte SHA-256 du jeton est conservée
+  expiresAt: string;
+  lastSentAt: string;
+}
+
 export interface Database {
+  pendingRegistrations: PendingRegistration[];
   users: User[];
   books: Book[];
   loans: Loan[];
@@ -53,6 +70,7 @@ const buildInitialDb = (): Database => ({
   visitors: [],
   transactions: [],
   counters: {},
+  pendingRegistrations: [],
   lastUpdated: new Date().toISOString(),
 });
 
@@ -81,7 +99,7 @@ const backupExisting = (reason: string) => {
 const migrate = (data: Database): boolean => {
   let changed = false;
 
-  for (const key of ['users', 'books', 'loans', 'reservations', 'receipts', 'activityLogs', 'visitors', 'transactions'] as const) {
+  for (const key of ['users', 'books', 'loans', 'reservations', 'receipts', 'activityLogs', 'visitors', 'transactions', 'pendingRegistrations'] as const) {
     if (!Array.isArray(data[key])) {
       (data as any)[key] = [];
       changed = true;
@@ -171,11 +189,32 @@ export const sweep = (data: Database): boolean => {
   }
 
   for (const res of data.reservations) {
+    const wasPaidHold = res.status === 'active';
     // 'en_attente_paiement' = livre mis de côté pendant le paiement (délai court) ; 'active' = payée, 4 jours
     if ((res.status === 'active' || res.status === 'en_attente_paiement') && new Date(res.expiresAt).getTime() < now) {
       res.status = 'expiree';
       changed = true;
+      if (wasPaidHold) {
+        // Réservation non retirée dans les 4 jours : elle expire et l'exemplaire revient en rayon (stock recalculé plus bas)
+        data.activityLogs.unshift({
+          id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          timestamp: new Date().toISOString().replace('T', ' ').slice(0, 16),
+          actorName: 'Système',
+          actorRole: 'systeme',
+          action: 'Expiration Réservation',
+          target: res.reference,
+          details: `"${res.bookTitle}" non retiré par ${res.userName} : exemplaire remis en rayon`,
+          ipAddress: '-',
+        });
+        data.activityLogs = data.activityLogs.slice(0, 500);
+      }
     }
+  }
+
+  const stillPending = (data.pendingRegistrations ?? []).filter((p) => new Date(p.expiresAt).getTime() >= now);
+  if (stillPending.length !== (data.pendingRegistrations ?? []).length) {
+    data.pendingRegistrations = stillPending;
+    changed = true;
   }
 
   const activeLoans = new Map<string, number>();

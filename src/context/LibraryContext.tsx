@@ -51,6 +51,7 @@ interface LibraryContextType {
     password?: string;
   }) => Promise<boolean>;
   logoutUser: () => Promise<void>;
+  resendVerificationEmail: (email: string) => Promise<boolean>;
   updateUserStatus: (userId: string, status: 'actif' | 'suspendu') => Promise<void>;
   updateUserRole: (userId: string, newRole: User['role']) => Promise<void>;
 
@@ -291,8 +292,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const run = useCallback(
     async (method: string, url: string, body?: unknown): Promise<{ ok: boolean; data: any; error?: string }> => {
       const res = await callApi(method, url, body);
-      if (res.ok && res.data?.state) {
-        applyState(res.data.state as ServerState);
+      if (res.ok) {
+        if (res.data?.state) applyState(res.data.state as ServerState);
         return { ok: true, data: res.data };
       }
       const error: string = res.data?.error || 'Une erreur est survenue.';
@@ -327,11 +328,15 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   const registerUser: LibraryContextType['registerUser'] = async (data) => {
+    // Le compte n'est créé qu'après clic sur le lien reçu par e-mail
     const r = await run('POST', '/api/auth/register', data);
-    if (r.ok) {
-      const me = r.data.state?.me;
-      addToast(`Bienvenue ${me?.name} (${me?.academicLevel} - ${me?.filiere}) ! Carte n° ${me?.studentCardNumber}`, 'success');
-    }
+    if (r.ok) addToast(`E-mail de vérification envoyé à ${data.email}. Cliquez sur le lien pour activer votre compte.`, 'info');
+    return r.ok;
+  };
+
+  const resendVerificationEmail = async (email: string): Promise<boolean> => {
+    const r = await run('POST', '/api/auth/resend-verification', { email });
+    if (r.ok) addToast(`Nouvel e-mail de vérification envoyé à ${email}.`, 'info');
     return r.ok;
   };
 
@@ -586,6 +591,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         loginUser,
         registerUser,
         logoutUser,
+        resendVerificationEmail,
         updateUserStatus,
         updateUserRole,
         upgradeSubscription,

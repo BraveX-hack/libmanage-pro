@@ -68,3 +68,8 @@ Application web développée par le collectif étudiant **2GroupESGIS** (ESGIS -
 - Le lecteur règle le total de son panier via Bachs ; les livres sont mis de côté pendant le paiement, puis réservés 4 jours une fois le paiement confirmé par Bachs.
 - La **photo de couverture** se téléverse depuis le formulaire (JPEG, PNG ou WebP, redimensionnée automatiquement) ; elle est stockée dans `data/uploads/`.
 - Bachs impose un produit à « prix personnalisé » pour un montant variable : renseigner `BACHS_PRODUCT_RESERVATION` (voir `.env.example`).
+
+### ✉️ Inscription avec vérification d'e-mail & connexion Google
+- L'inscription ne crée **plus** de compte immédiatement : un e-mail contenant un lien (valable 24 h) est envoyé ; le compte n'existe qu'après clic sur ce lien. Renvoi possible toutes les 2 minutes.
+- Renseigner `SMTP_*` et `APP_PUBLIC_URL` dans `.env` (Gmail : mot de passe d'application). Sans SMTP en développement, le lien est affiché dans le terminal.
+- **Connexion Google** : renseigner `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` et ajouter `http://localhost:3000/api/auth/google/callback` aux URI de redirection autorisées dans Google Cloud. Seuls les e-mails vérifiés par Google sont acceptés ; un compte existant avec la même adresse est rattaché.

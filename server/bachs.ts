@@ -100,12 +100,15 @@ export const createCheckoutSession = async (opts: {
   // Bachs renvoie l'identifiant sous le nom « checkout_id » (ex. chk_...)
   const id = pick(data, 'checkout_id', 'data.checkout_id', 'id', 'data.id', 'checkout_session_id', 'data.checkout_session_id');
   if (!res.ok || !checkoutUrl || !id) {
-    console.error('[Bachs] Création de session refusée :', res.status, JSON.stringify(data));
+    const target = `${e.url}/v1/checkout-sessions`;
+    console.error('[Bachs] Création de session refusée :', res.status, 'POST', target, JSON.stringify(data));
     const detail = pick(data, 'message', 'error.message', 'error', 'detail', 'data.message');
+    const hint =
+      res.status === 404 || res.status === 405
+        ? ` Adresse appelée : ${new URL(target).host}. BACHS_URL doit être l'adresse de l'API (ex. https://sandbox-api.bachs.io), pas celle du site ou de la page de paiement.`
+        : ' Vérifiez la clé API et le produit.';
     throw new Error(
-      `Bachs a refusé la création du paiement (code ${res.status}${
-        typeof detail === 'string' ? ` : ${detail.slice(0, 160)}` : ''
-      }). Vérifiez la clé API et le produit.`
+      `Bachs a refusé la création du paiement (code ${res.status}${typeof detail === 'string' ? ` : ${detail.slice(0, 160)}` : ''}).${hint}`
     );
   }
   return { id: String(id), checkoutUrl };

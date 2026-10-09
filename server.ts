@@ -5,7 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createApiRouter } from './server/api';
-import { DATA_DIR, DB_FILE, initStore } from './server/store';
+import { DATA_DIR, DB_FILE, initStore, read } from './server/store';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -98,6 +98,15 @@ async function startServer() {
       res.sendFile(path.join(distDir, 'index.html'));
     });
   }
+
+  // Balayage périodique : expire les réservations non retirées même sans activité sur le site
+  setInterval(() => {
+    try {
+      read();
+    } catch (err) {
+      console.error('[BiblioTech] Balayage des réservations impossible :', err);
+    }
+  }, 5 * 60 * 1000).unref();
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[BiblioTech] Serveur démarré sur http://localhost:${PORT} (${isProd ? 'production' : 'développement'})`);

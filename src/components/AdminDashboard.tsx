@@ -477,22 +477,35 @@ export const AdminDashboard: React.FC = () => {
                 </p>
               ) : (
                 <div className="divide-y divide-slate-100 text-xs">
-                  {activeReservations.map((res) => (
-                    <div key={res.id} className="py-2.5 flex items-center justify-between">
-                      <div>
-                        <div className="font-bold text-slate-900">{res.bookTitle}</div>
-                        <div className="text-slate-500">
-                          {res.userName} · {res.pickupDesk}
+                  {activeReservations.map((res) => {
+                    const owner = users.find((u) => u.id === res.userId);
+                    const daysLeft = Math.max(0, Math.ceil((new Date(res.expiresAt).getTime() - Date.now()) / 86400000));
+                    return (
+                      <div key={res.id} className="py-2.5 flex items-center justify-between gap-3">
+                        <div>
+                          <div className="font-bold text-slate-900">
+                            {res.userName}
+                            {owner?.studentCardNumber && (
+                              <span className="font-mono font-normal text-slate-500"> ({owner.studentCardNumber})</span>
+                            )}
+                          </div>
+                          <div className="text-slate-700">{res.bookTitle}</div>
+                          <div className="text-slate-500">
+                            {res.reference} · expire le {new Date(res.expiresAt).toLocaleDateString('fr-FR')}{' '}
+                            <span className={daysLeft <= 1 ? 'font-semibold text-rose-700' : 'font-semibold text-amber-700'}>
+                              ({daysLeft} j restant{daysLeft > 1 ? 's' : ''})
+                            </span>
+                          </div>
                         </div>
+                        <button
+                          onClick={() => pickupReservation(res.id)}
+                          className="px-3 py-1.5 text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg transition-colors shadow-xs"
+                        >
+                          Retirer
+                        </button>
                       </div>
-                      <button
-                        onClick={() => pickupReservation(res.id)}
-                        className="px-3 py-1.5 text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg transition-colors shadow-xs"
-                      >
-                        Valider Retrait
-                      </button>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

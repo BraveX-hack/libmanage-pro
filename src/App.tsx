@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { Suspense, lazy, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useState } from 'react';
 import { LibraryProvider, useLibrary } from './context/LibraryContext';
 import { Navbar } from './components/Navbar';
 import { PromoBanner } from './components/PromoBanner';
@@ -34,6 +34,37 @@ function MainApp() {
   const [isCartOpen, setIsCartOpen] = useState(false);
 
   const [isRedirectingToPayment, setIsRedirectingToPayment] = useState(false);
+
+  // Retour depuis le lien de vérification d'e-mail ou depuis Google : message puis nettoyage de l'adresse
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const verified = params.get('email_verifie');
+    const google = params.get('google');
+    if (verified === null && google === null) return;
+
+    if (verified === '1') {
+      addToast('Adresse e-mail vérifiée ! Vous pouvez maintenant vous connecter.', 'success');
+      setIsAuthOpen(true);
+    } else if (verified === '0') {
+      addToast('Lien de vérification invalide ou expiré. Recommencez votre inscription.', 'error');
+    }
+    const googleMessages: Record<string, [string, 'success' | 'error' | 'warning']> = {
+      ok: ['Connexion avec Google réussie.', 'success'],
+      annule: ['Connexion avec Google annulée.', 'warning'],
+      erreur: ['La connexion avec Google a échoué. Réessayez.', 'error'],
+      email_non_verifie: ["Votre adresse Google n'est pas vérifiée.", 'error'],
+      suspendu: ["Ce compte est suspendu. Contactez l'administration de la bibliothèque.", 'error'],
+      conflit: ['Cette adresse est déjà liée à un autre compte Google.', 'error'],
+      non_configure: ["La connexion Google n'est pas configurée sur le serveur.", 'error'],
+    };
+    if (google && googleMessages[google]) addToast(googleMessages[google][0], googleMessages[google][1]);
+
+    params.delete('email_verifie');
+    params.delete('google');
+    const query = params.toString();
+    window.history.replaceState({}, '', window.location.pathname + (query ? `?${query}` : ''));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleHeroSearch = (query: string) => {
     setCatalogueSearchQuery(query);

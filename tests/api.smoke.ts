@@ -11,6 +11,27 @@ import path from 'path';
 
 const PORT = 3999;
 const MOCK_PORT = 3997;
+const GOOGLE_PORT = 3995;
+let googleProfile: any = {};
+const mockGoogle = http.createServer((req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  if (req.url === '/token' && req.method === 'POST') {
+    let raw = '';
+    req.on('data', (c) => (raw += c));
+    req.on('end', () => {
+      const p = new URLSearchParams(raw);
+      if (p.get('client_secret') !== 'gsecret' || p.get('grant_type') !== 'authorization_code') {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: 'invalid_client' }));
+      } else res.end(JSON.stringify({ access_token: 'tok_google' }));
+    });
+  } else if (req.url === '/userinfo') {
+    res.end(JSON.stringify(googleProfile));
+  } else {
+    res.statusCode = 404;
+    res.end('{}');
+  }
+});
 // Faux serveur Bachs pour tester l'intégration sans réseau
 let mockStatus = 'open';
 let mockLastAuth = '';
@@ -82,6 +103,12 @@ const startServer = () =>
       BACHS_URL: `http://127.0.0.1:${MOCK_PORT}`,
       BACHS_API_KEY: 'sk_test_fake',
       PRODUIT_ID: 'prod_test',
+      GOOGLE_CLIENT_ID: 'gid',
+      GOOGLE_CLIENT_SECRET: 'gsecret',
+      GOOGLE_AUTH_URL: `http://127.0.0.1:${GOOGLE_PORT}/auth`,
+      GOOGLE_TOKEN_URL: `http://127.0.0.1:${GOOGLE_PORT}/token`,
+      GOOGLE_USERINFO_URL: `http://127.0.0.1:${GOOGLE_PORT}/userinfo`,
+      SMTP_HOST: '',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -110,6 +137,7 @@ async function main() {
     process.exit(2);
   }
   await new Promise<void>((r) => mockBachs.listen(MOCK_PORT, '127.0.0.1', () => r()));
+  await new Promise<void>((r) => mockGoogle.listen(GOOGLE_PORT, '127.0.0.1', () => r()));
   const server = startServer();
   let serverLog = '';
   server.stdout.on('data', (d) => (serverLog += d));
@@ -133,25 +161,87 @@ async function main() {
     r = await anon.call('POST', '/api/books', { title: 'x' });
     check('création de livre refusée aux anonymes', r.status === 401);
 
-    console.log('\nInscription & session');
+    console.log('\nInscription avec vérification d\'e-mail');
     const stu = new Client();
+    const outbox = path.join(dataDir, 'outbox');
+    const tokenFor = (email: string): string | null => {
+      if (!fs.existsSync(outbox)) return null;
+      const files = fs.readdirSync(outbox).filter((f) => f.includes(email.toLowerCase())).sort();
+      if (!files.length) return null;
+      const mail = JSON.parse(fs.readFileSync(path.join(outbox, files[files.length - 1]), 'utf-8'));
+      return (/token=([0-9a-f]{64})/.exec(mail.text) || [])[1] ?? null;
+    };
+    const verify = async (token: string) => {
+      const res = await fetch(`${BASE}/api/auth/verify-email?token=${token}`, { redirect: 'manual' });
+      return { status: res.status, location: res.headers.get('location') || '' };
+    };
     r = await stu.call('POST', '/api/auth/register', {
       lastName: 'Test', firstName: 'Étudiant', email: 'test.etudiant@example.com', school: 'ESGIS',
       birthDate: '2003-05-14', password: 'court',
     });
     check('mot de passe trop court refusé', r.status === 400);
     r = await stu.call('POST', '/api/auth/register', {
+      lastName: 'Test', firstName: 'Étudiant', email: 'pas-un-email', school: 'ESGIS',
+      birthDate: '2003-05-14', password: 'MotDePasse123',
+    });
+    check('adresse e-mail invalide refusée', r.status === 400);
+    r = await stu.call('POST', '/api/auth/register', {
       lastName: 'Test', firstName: 'Étudiant', email: 'test.etudiant@example.com', school: 'ESGIS',
       birthDate: '2003-05-14', password: 'MotDePasse123', role: 'super_admin',
     });
-    check('inscription réussie', r.status === 201 && r.json.state.me?.role === 'etudiant', r.json);
-    check('rôle imposé par le serveur (pas d\'escalade)', r.json.state.me.role === 'etudiant');
-    check('hash du mot de passe jamais renvoyé', !JSON.stringify(r.json).includes('passwordHash'));
+    check('inscription : en attente, aucun compte ni session créés', r.status === 202 && r.json.pending === true && !r.json.state, r.json);
+    check('aucun compte tant que l\'e-mail n\'est pas vérifié', (await stu.call('GET', '/api/state')).json.me === null);
+    r = await stu.call('POST', '/api/auth/login', { email: 'test.etudiant@example.com', password: 'MotDePasse123' });
+    check('connexion impossible avant vérification', r.status === 401);
+    const dbPending = JSON.parse(fs.readFileSync(path.join(dataDir, 'database.json'), 'utf-8'));
+    const token = tokenFor('test.etudiant@example.com');
+    check('lien de vérification envoyé par e-mail', !!token);
+    check('seule l\'empreinte du jeton est stockée (jamais le jeton)', !!token && !JSON.stringify(dbPending).includes(token) && dbPending.pendingRegistrations[0].tokenHash.length === 64);
     r = await stu.call('POST', '/api/auth/register', {
+      lastName: 'Test', firstName: 'Bis', email: 'test.etudiant@example.com', school: 'ESGIS',
+      birthDate: '2003-05-14', password: 'MotDePasse123',
+    });
+    check('renvoi trop rapide refusé (anti-spam 2 min)', r.status === 429);
+    let v = await verify('0'.repeat(64));
+    check('faux jeton refusé', v.location.includes('email_verifie=0'));
+    v = await verify(token!);
+    check('lien valide : compte créé et redirection', v.status === 302 && v.location.includes('email_verifie=1'), v);
+    v = await verify(token!);
+    check('lien déjà utilisé refusé', v.location.includes('email_verifie=0'));
+    r = await stu.call('POST', '/api/auth/login', { email: 'TEST.etudiant@example.com', password: 'MotDePasse123' });
+    check('connexion OK après vérification (rôle étudiant imposé)', r.status === 200 && r.json.state.me?.role === 'etudiant', r.json);
+    check('hash du mot de passe jamais renvoyé', !JSON.stringify(r.json).includes('passwordHash'));
+    r = await new Client().call('POST', '/api/auth/register', {
       lastName: 'Test', firstName: 'Bis', email: 'TEST.etudiant@example.com', school: 'ESGIS',
       birthDate: '2003-05-14', password: 'MotDePasse123',
     });
     check('doublon d\'email refusé (insensible à la casse)', r.status === 409);
+    r = await anon.call('POST', '/api/auth/resend-verification', { email: 'inconnu@example.com' });
+    check('renvoi pour une adresse sans inscription en attente : 404', r.status === 404);
+
+    console.log('\nConnexion avec Google');
+    const gr = await fetch(`${BASE}/api/auth/google`, { redirect: 'manual' }).then(async (x) => ({ status: x.status, location: x.headers.get('location') || '', cookie: x.headers.get('set-cookie') || '' }));
+    check('redirection vers Google avec client_id, state et scope', gr.status === 302 && gr.location.startsWith(`http://127.0.0.1:${GOOGLE_PORT}/auth`) && gr.location.includes('client_id=gid') && gr.location.includes('scope=openid+email+profile'), gr.location);
+    const state = new URL(gr.location).searchParams.get('state')!;
+    const stateCookie = gr.cookie.split(';')[0];
+    let cb = await fetch(`${BASE}/api/auth/google/callback?code=abc&state=${state}`, { redirect: 'manual', headers: { Cookie: 'bt_oauth_state=autre' } });
+    check('état OAuth falsifié refusé (anti-CSRF)', (cb.headers.get('location') || '').includes('google=erreur'));
+    googleProfile = { sub: 'g-1', email: 'nouveau.google@example.com', email_verified: true, given_name: 'Awa', family_name: 'Kossi', picture: 'https://example.com/a.png' };
+    cb = await fetch(`${BASE}/api/auth/google/callback?code=abc&state=${state}`, { redirect: 'manual', headers: { Cookie: stateCookie } });
+    const gSession = (cb.headers.getSetCookie?.() || []).find((c) => c.startsWith('bt_session='))?.split(';')[0] || '';
+    check('Google : connexion réussie et session ouverte', (cb.headers.get('location') || '').includes('google=ok') && !!gSession);
+    const gState = await fetch(`${BASE}/api/state`, { headers: { Cookie: gSession } }).then((x) => x.json());
+    check('Google : compte étudiant créé automatiquement', gState.me?.email === 'nouveau.google@example.com' && gState.me.role === 'etudiant' && !JSON.stringify(gState).includes('g-1'), gState.me);
+    cb = await fetch(`${BASE}/api/auth/google/callback?code=abc&state=${state}`, { redirect: 'manual', headers: { Cookie: stateCookie } });
+    const again = await fetch(`${BASE}/api/state`, { headers: { Cookie: (cb.headers.getSetCookie?.() || []).find((c) => c.startsWith('bt_session='))?.split(';')[0] || '' } }).then((x) => x.json());
+    check('Google : 2e connexion = même compte (pas de doublon)', again.me?.id === gState.me.id);
+    googleProfile = { sub: 'g-2', email: 'faux.verifie@example.com', email_verified: false, given_name: 'X', family_name: 'Y' };
+    cb = await fetch(`${BASE}/api/auth/google/callback?code=abc&state=${state}`, { redirect: 'manual', headers: { Cookie: stateCookie } });
+    check('Google : e-mail non vérifié refusé', (cb.headers.get('location') || '').includes('google=email_non_verifie') && !(cb.headers.getSetCookie?.() || []).some((c) => c.startsWith('bt_session=') && !c.includes('Max-Age=0')));
+    googleProfile = { sub: 'g-3', email: 'test.etudiant@example.com', email_verified: true, given_name: 'Test', family_name: 'Etudiant' };
+    cb = await fetch(`${BASE}/api/auth/google/callback?code=abc&state=${state}`, { redirect: 'manual', headers: { Cookie: stateCookie } });
+    const linked = await fetch(`${BASE}/api/state`, { headers: { Cookie: (cb.headers.getSetCookie?.() || []).find((c) => c.startsWith('bt_session='))?.split(';')[0] || '' } }).then((x) => x.json());
+    check('Google : e-mail déjà inscrit = rattachement au compte existant', linked.me?.email === 'test.etudiant@example.com' && linked.me.id === (await stu.call('GET', '/api/state')).json.me.id);
 
     console.log('\nDroits des étudiants');
     r = await stu.call('GET', '/api/visitors');
@@ -256,6 +346,20 @@ async function main() {
     r = await stu.call('POST', '/api/reservations', { bookIds: [freeBookId] });
     check('livre à 0 FCFA : réservation gratuite immédiate avec ticket', r.status === 200 && !r.json.checkoutUrl && r.json.receipt?.type === 'reservation', r.json);
 
+    console.log('\nRetrait au guichet');
+    const freeRes = r.json.state.reservations.find((x: any) => x.bookId === freeBookId && x.status === 'active');
+    const stockWhileReserved = r.json.state.books.find((b: any) => b.id === freeBookId).stockAvailable;
+    r = await stu.call('PUT', `/api/reservations/${freeRes.id}/pickup`);
+    check('étudiant : ne peut pas valider un retrait', r.status === 403);
+    r = await adm.call('PUT', `/api/reservations/${freeRes.id}/pickup`);
+    const pickedLoan = r.json.state?.loans.find((l: any) => l.bookId === freeBookId && l.status !== 'rendu');
+    check('bibliothécaire : retrait validé', r.status === 200 && r.json.state.reservations.find((x: any) => x.id === freeRes.id).status === 'retiree', r.json);
+    check('le prêt est créé au nom du lecteur (pas de l\'admin)', pickedLoan?.userId === meId.id && pickedLoan?.userEmail === 'test.etudiant@example.com', pickedLoan);
+    check('stock inchangé au retrait (l\'exemplaire reste sorti)', r.json.state.books.find((b: any) => b.id === freeBookId).stockAvailable === stockWhileReserved);
+    check('quittance d\'emprunt émise pour le lecteur', r.json.receipt?.type === 'emprunt' && r.json.receipt.userId === meId.id);
+    r = await adm.call('PUT', `/api/reservations/${freeRes.id}/pickup`);
+    check('double retrait refusé', r.status === 409);
+
     console.log('\nPhoto du livre (téléversement)');
     const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(60, 1)]).toString('base64');
     r = await stu.call('POST', '/api/uploads/cover', { dataUrl: `data:image/png;base64,${png}` });
@@ -287,6 +391,10 @@ async function main() {
     const koffi = db.users.find((u: any) => u.email === 'koffi.alexandre@univ-tech.edu');
     const target = db.books.find((b: any) => b.id !== book.id && b.stockAvailable > 0);
     db.loans.unshift({ id: 'loan-late-test', reference: 'EMP-TEST-1', userId: koffi.id, userName: koffi.name, userEmail: koffi.email, bookId: target.id, bookTitle: target.title, bookAuthor: target.author, bookCover: target.coverUrl, isbn: target.isbn, borrowDate: lateDue, dueDate: lateDue, status: 'en_cours', renewalCount: 0, dailyLateFee: 200 });
+    const expBook = db.books.find((b: any) => b.id !== book.id && b.id !== target.id && b.stockAvailable > 0);
+    const heldElsewhere = db.loans.filter((l: any) => l.bookId === expBook.id && l.status !== 'rendu').length + db.reservations.filter((x: any) => x.bookId === expBook.id && x.status === 'active').length;
+    db.reservations.unshift({ id: 'res-exp-test', reference: 'RES-TEST-EXP', userId: koffi.id, userName: koffi.name, bookId: expBook.id, bookTitle: expBook.title, bookAuthor: expBook.author, bookCover: expBook.coverUrl, isbn: expBook.isbn, reservedAt: new Date(Date.now() - 5 * 86400000).toISOString(), expiresAt: new Date(Date.now() - 1 * 86400000).toISOString(), status: 'active', pickupDesk: 'Guichet 2' });
+    expBook.stockAvailable = expBook.stockTotal - heldElsewhere - 1;
     fs.writeFileSync(dbFile, JSON.stringify(db));
     // Le serveur garde la base en mémoire : on redémarre pour simuler la relecture disque
     stopServer(server);
@@ -297,6 +405,12 @@ async function main() {
       const adm2 = new Client();
       const lg = await adm2.call('POST', '/api/auth/login', { email: 'wottoprecieux@gmail.com', password: 'wottoSecret2026' });
       let s = (await adm2.call('GET', '/api/state')).json;
+      const expired = s.reservations.find((x: any) => x.id === 'res-exp-test');
+      check('réservation non retirée après 4 jours : expirée automatiquement', expired?.status === 'expiree', expired);
+      check('le stock revient à la normale après expiration', s.books.find((b: any) => b.id === expBook.id).stockAvailable === expBook.stockTotal - heldElsewhere);
+      check('expiration tracée dans le journal', s.activityLogs.some((l: any) => l.action === 'Expiration Réservation' && l.target === 'RES-TEST-EXP'));
+      r = await adm2.call('PUT', '/api/reservations/res-exp-test/pickup');
+      check('retrait d\'une réservation expirée refusé', r.status === 409);
       const lateLoan = s.loans.find((l: any) => l.id === 'loan-late-test');
       check('prêt dépassé passé automatiquement en "en_retard"', lateLoan?.status === 'en_retard', lateLoan);
       r = await adm2.call('PUT', '/api/loans/loan-late-test/return');
@@ -320,6 +434,7 @@ async function main() {
   } finally {
     stopServer(server);
     mockBachs.close();
+    mockGoogle.close();
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 

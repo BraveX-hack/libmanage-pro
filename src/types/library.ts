@@ -10,6 +10,7 @@ export interface User {
   role: UserRole;
   passwordHash?: string;
   legacyDemoPassword?: boolean;
+  googleId?: string;
   studentCardNumber?: string;
   nationalIdCard?: string;
   birthDate?: string;
@@ -25,7 +26,7 @@ export interface User {
   joinedDate: string;
 }
 
-export type PublicUser = Omit<User, 'passwordHash' | 'legacyDemoPassword'>;
+export type PublicUser = Omit<User, 'passwordHash' | 'legacyDemoPassword' | 'googleId'>;
 
 export interface Book {
   id: string;
@@ -136,7 +137,7 @@ export interface ActivityLog {
   id: string;
   timestamp: string;
   actorName: string;
-  actorRole: UserRole;
+  actorRole: UserRole | 'systeme';
   action: string;
   target: string;
   details: string;
