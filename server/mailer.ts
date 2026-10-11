@@ -20,23 +20,103 @@ export interface MailMessage {
 
 export const isSmtpConfigured = (): boolean => !!process.env.SMTP_HOST && !!process.env.SMTP_USER && !!process.env.SMTP_PASSWORD;
 
-export const mailMode = (): 'smtp' | 'dev' | 'none' =>
-  isSmtpConfigured() ? 'smtp' : process.env.NODE_ENV === 'production' ? 'none' : 'dev';
+/**
+ * Fournisseur d'envoi, par ordre de priorité :
+ *  - brevo / resend : API web en HTTPS (port 443) — fonctionne sur Render gratuit, où les ports SMTP sont bloqués ;
+ *  - smtp : serveur SMTP classique (Gmail…) ;
+ *  - dev : développement sans configuration (lien écrit dans le terminal) ; none : production non configurée.
+ */
+export type MailProvider = 'brevo' | 'resend' | 'smtp' | 'dev' | 'none';
+
+export const mailMode = (): MailProvider =>
+  process.env.BREVO_API_KEY
+    ? 'brevo'
+    : process.env.RESEND_API_KEY
+    ? 'resend'
+    : isSmtpConfigured()
+    ? 'smtp'
+    : process.env.NODE_ENV === 'production'
+    ? 'none'
+    : 'dev';
+
+export class MailApiError extends Error {
+  constructor(public provider: string, public status: number, public detail: string) {
+    super(`${provider} a répondu ${status} : ${detail}`);
+  }
+}
 
 /** Explication lisible d'un échec d'envoi (affichée seulement hors production). */
 export const describeMailError = (err: unknown): string => {
+  if (err instanceof MailApiError) {
+    if (err.status === 401 || err.status === 403)
+      return `${err.provider} : clé API refusée (${err.status}). Vérifiez la clé dans les variables d'environnement, sans espace ni guillemets.`;
+    if (err.status === 400 || err.status === 422)
+      return `${err.provider} : message refusé — l'adresse d'expéditeur (MAIL_FROM_EMAIL) doit être validée chez ${err.provider}. Détail : ${err.detail.slice(0, 200)}`;
+    if (err.status === 429) return `${err.provider} : limite d'envois atteinte, réessayez plus tard.`;
+    return `${err.provider} : ${err.detail.slice(0, 200)}`;
+  }
   const e = err as { code?: string; responseCode?: number; message?: string };
   const code = e?.code || '';
   if (code === 'EAUTH' || e?.responseCode === 535)
     return "SMTP : identifiants refusés. Avec Gmail, utilisez un « mot de passe d'application » (validation en 2 étapes requise), pas le mot de passe du compte, et SMTP_USER doit être l'adresse Gmail complète.";
   if (code === 'ECONNECTION' || code === 'ESOCKET' || code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'ETIMEDOUT')
-    return "SMTP : serveur injoignable. Vérifiez SMTP_HOST et SMTP_PORT (Gmail : smtp.gmail.com, 587), votre connexion, et qu'un antivirus ou pare-feu ne bloque pas le port.";
+    return "SMTP : serveur injoignable. Vérifiez SMTP_HOST et SMTP_PORT, votre connexion et le pare-feu. Sur Render gratuit, les ports SMTP (25, 465, 587) sont bloqués : utilisez BREVO_API_KEY ou RESEND_API_KEY.";
   if (code === 'EENVELOPE') return "SMTP : adresse destinataire ou expéditeur refusée (vérifiez MAIL_FROM_EMAIL).";
-  return `SMTP : ${e?.message || 'erreur inconnue'}`;
+  return `Envoi : ${e?.message || 'erreur inconnue'}`;
+};
+
+const fromAddress = (): { email: string; name: string } => {
+  const email = process.env.MAIL_FROM_EMAIL || process.env.SMTP_USER || '';
+  if (!email) throw new Error('MAIL_FROM_EMAIL est obligatoire (adresse d\'expéditeur validée chez votre fournisseur).');
+  return { email, name: process.env.MAIL_FROM_NAME || 'BiblioTech' };
+};
+
+const postJson = async (provider: string, url: string, headers: Record<string, string>, body: unknown): Promise<void> => {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...headers },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    let detail = text;
+    try {
+      const j = JSON.parse(text);
+      detail = j.message || j.error?.message || j.error || text;
+    } catch {
+      /* texte brut */
+    }
+    throw new MailApiError(provider, res.status, String(detail));
+  }
 };
 
 export const sendMail = async (msg: MailMessage): Promise<void> => {
-  if (isSmtpConfigured()) {
+  const mode = mailMode();
+
+  if (mode === 'brevo') {
+    const from = fromAddress();
+    await postJson(
+      'Brevo',
+      process.env.BREVO_API_URL || 'https://api.brevo.com/v3/smtp/email',
+      { 'api-key': process.env.BREVO_API_KEY!.trim() },
+      { sender: { name: from.name, email: from.email }, to: [{ email: msg.to }], subject: msg.subject, htmlContent: msg.html, textContent: msg.text }
+    );
+    return;
+  }
+
+  if (mode === 'resend') {
+    const from = fromAddress();
+    await postJson(
+      'Resend',
+      process.env.RESEND_API_URL || 'https://api.resend.com/emails',
+      { Authorization: `Bearer ${process.env.RESEND_API_KEY!.trim()}` },
+      { from: `${from.name} <${from.email}>`, to: [msg.to], subject: msg.subject, html: msg.html, text: msg.text }
+    );
+    return;
+  }
+
+  if (mode === 'smtp') {
     const port = Number(process.env.SMTP_PORT) || 587;
     // Les mots de passe d'application Gmail s'affichent « abcd efgh ijkl mnop » : les espaces ne font pas partie du mot de passe
     const smtpPass = /gmail|googlemail/i.test(process.env.SMTP_HOST || '')
@@ -51,27 +131,20 @@ export const sendMail = async (msg: MailMessage): Promise<void> => {
       greetingTimeout: 15000,
       socketTimeout: 20000,
     });
-    const fromEmail = process.env.MAIL_FROM_EMAIL || process.env.SMTP_USER!;
-    const fromName = process.env.MAIL_FROM_NAME || 'BiblioTech';
-    await transport.sendMail({
-      from: { name: fromName, address: fromEmail },
-      to: msg.to,
-      subject: msg.subject,
-      html: msg.html,
-      text: msg.text,
-    });
+    const from = fromAddress();
+    await transport.sendMail({ from: { name: from.name, address: from.email }, to: msg.to, subject: msg.subject, html: msg.html, text: msg.text });
     return;
   }
 
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error("L'envoi d'e-mails n'est pas configuré (SMTP_HOST, SMTP_USER, SMTP_PASSWORD).");
+  if (mode === 'none') {
+    throw new Error("L'envoi d'e-mails n'est pas configuré (BREVO_API_KEY, RESEND_API_KEY ou SMTP_*).");
   }
 
-  // Développement sans SMTP : on garde une trace lisible au lieu d'envoyer
+  // Développement sans configuration : on garde une trace lisible au lieu d'envoyer
   const dir = path.join(DATA_DIR, 'outbox');
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, `${Date.now()}-${msg.to.replace(/[^a-z0-9@._-]/gi, '_')}.json`), JSON.stringify(msg, null, 2));
-  console.log(`\n[BiblioTech] (mode développement, SMTP non configuré) E-mail pour ${msg.to} :\n${msg.text}\n`);
+  console.log(`\n[BiblioTech] (mode développement, aucun fournisseur d'e-mail configuré) E-mail pour ${msg.to} :\n${msg.text}\n`);
 };
 
 const escapeHtml = (s: string) =>
