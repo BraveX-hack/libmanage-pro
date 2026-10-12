@@ -116,7 +116,6 @@ const drawTicket = (doc: jsPDF, receipt: Receipt): number => {
 
   centered('Merci de votre visite !', true, 8.5);
   centered("Conservez ce ticket jusqu'à la restitution.", false, 7);
-  centered('2GroupESGIS', false, 7);
   y += MARGIN;
 
   return y;
