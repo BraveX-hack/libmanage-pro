@@ -33,7 +33,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
       {/* Background Hero Image with Scrim */}
       <div className="absolute inset-0 z-0">
         <img
-          src="/src/assets/images/hero_library_hall_1790865043506.jpg"
+          src="/images/hero_library_hall_1790865043506.jpg"
           alt="Grande salle de lecture de la bibliothèque universitaire"
           className="w-full h-full object-cover object-center opacity-30 filter brightness-75 contrast-110"
           referrerPolicy="no-referrer"
