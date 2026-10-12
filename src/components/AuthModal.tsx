@@ -124,7 +124,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
             </div>
             <div>
               <h2 className="font-serif font-bold text-slate-900 text-base sm:text-lg">
-                {mode === 'login' ? 'Connexion Lecteur & Administration' : 'Inscription Étudiant — 2GroupESGIS'}
+                {mode === 'login' ? 'Connexion Lecteur & Administration' : 'Inscription Étudiant'}
               </h2>
               <p className="text-[11px] text-slate-500">Bibliothèque Universitaire ESGIS</p>
             </div>
@@ -425,7 +425,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
               {googleButton}
 
               <p className="text-[10px] text-slate-400 text-center">
-                Un e-mail de confirmation vous sera envoyé : votre carte d'étudiant numérique 2GroupESGIS est attribuée dès que vous avez cliqué sur le lien.
+                Un e-mail de confirmation vous sera envoyé : votre carte d'étudiant numérique est attribuée dès que vous avez cliqué sur le lien.
               </p>
             </form>
           )}
