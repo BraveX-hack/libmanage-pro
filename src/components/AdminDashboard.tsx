@@ -236,7 +236,7 @@ export const AdminDashboard: React.FC = () => {
             <span className="px-2.5 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-amber-500 text-slate-950">
               Super-Administrateur
             </span>
-            <span className="text-xs text-slate-400">ESGIS — 2GroupESGIS</span>
+            <span className="text-xs text-slate-400">ESGIS</span>
           </div>
           <h1 className="text-2xl sm:text-3xl font-serif font-bold text-white mt-1">
             Console de Contrôle — WOTTO Précieux
