@@ -34,9 +34,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span className="text-xl font-bold font-serif tracking-tight text-slate-900">
               BiblioTech
             </span>
-            <span className="text-[11px] font-mono font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
-              2GroupESGIS
-            </span>
           </div>
         </button>
 
@@ -186,7 +183,3 @@ export const Navbar: React.FC<NavbarProps> = ({
     </header>
   );
 };
-
-
-
-
