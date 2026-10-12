@@ -254,7 +254,6 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ receipt, onClose }) 
             <div className="text-center">
               <div className="font-bold">Merci de votre visite !</div>
               <div className="text-[11px] text-slate-600">Conservez ce ticket jusqu'à la restitution.</div>
-              <div className="mt-1 text-[10px] text-slate-500">2GroupESGIS</div>
             </div>
           </div>
         </div>
