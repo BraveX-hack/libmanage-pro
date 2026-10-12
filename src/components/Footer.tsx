@@ -17,10 +17,10 @@ export const Footer: React.FC<FooterProps> = ({ onNavigateTab, onResetDemo }) =>
               <div className="w-7 h-7 rounded-lg bg-amber-500 text-slate-950 flex items-center justify-center font-bold">
                 <BookOpen className="w-4 h-4" />
               </div>
-              <span className="font-serif font-bold text-base tracking-tight">BiblioTech · 2GroupESGIS</span>
+              <span className="font-serif font-bold text-base tracking-tight">BiblioTech</span>
             </div>
             <p className="text-slate-400 text-xs leading-relaxed">
-              Plateforme universitaire de gestion documentaire développée par l'équipe <strong>2GroupESGIS</strong>. Réservations 4 jours, quittances certifiées et paiement mobile.
+              Plateforme universitaire de gestion documentaire. Réservations 4 jours, quittances certifiées et paiement mobile.
             </p>
             {onResetDemo && (
               <div className="pt-2">
@@ -91,7 +91,7 @@ export const Footer: React.FC<FooterProps> = ({ onNavigateTab, onResetDemo }) =>
             <div className="text-slate-400 space-y-1">
               <div>Lundi – Vendredi : 07h30 – 21h00</div>
               <div>Samedi : 08h00 – 18h00</div>
-              <div>Projet Académique : <strong>2GroupESGIS</strong></div>
+              <div>Projet Académique : <strong>ESGIS</strong></div>
               <div className="text-slate-500 pt-1 text-[11px]">
                 Prêt standard : 14 jours · Prolongation 1x
               </div>
@@ -125,7 +125,7 @@ export const Footer: React.FC<FooterProps> = ({ onNavigateTab, onResetDemo }) =>
 
         <div className="mt-8 pt-6 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-4 text-[11px] text-slate-500">
           <div>
-            © {new Date().getFullYear()} BiblioTech — Réalisé par le groupe <strong>2GroupESGIS</strong> (ESGIS).
+            © {new Date().getFullYear()} BiblioTech.
           </div>
           <div className="flex items-center gap-4">
             <span className="flex items-center gap-1 text-emerald-400">
