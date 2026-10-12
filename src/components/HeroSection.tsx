@@ -46,7 +46,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
           {/* Subtle natural kicker */}
           <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-amber-400 mb-4">
             <span className="w-2 h-2 rounded-full bg-amber-400" />
-            <span>Portail Universitaire des Ressources Documentaires · 2GroupESGIS</span>
+            <span>Portail Universitaire des Ressources Documentaires</span>
           </div>
 
           <h1 className="text-4xl sm:text-5xl lg:text-6xl font-serif font-bold tracking-tight text-white text-balance leading-tight mb-6">
