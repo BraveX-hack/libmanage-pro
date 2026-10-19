@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { NextFunction, Request, Response, Router } from 'express';
+import express, { NextFunction, Request, Response, Router } from 'express';
 import type {
   Book,
   Loan,
@@ -10,6 +10,7 @@ import type {
   Reservation,
   PaymentTransaction,
   PublicUser,
+  ReadingAccess,
   SubscriptionPlan,
   User,
   UserRole,
@@ -30,7 +31,7 @@ import {
 import { buildAuthUrl as buildGoogleAuthUrl, fetchGoogleProfile, isGoogleConfigured } from './google';
 import { describeMailError, sendMail, verificationEmail, mailMode } from './mailer';
 import { checkSession, createCheckoutSession, isBachsConfigured, reservationProduct, toBachsAmount } from './bachs';
-import { Database, DATA_DIR, DB_FILE, mutate, nextCounter, read, resetToDemo, todayISO } from './store';
+import { Database, CONTENT_DIR, DATA_DIR, DB_FILE, READING_DAYS, contentPath, mutate, nextCounter, read, resetToDemo, todayISO } from './store';
 
 // ======================================================
 // Utilitaires
@@ -244,6 +245,7 @@ const buildState = (data: Database, user: User | null) => {
     books: staff ? data.books : data.books.filter((b) => !b.isArchived),
     loans: staff ? data.loans : user ? data.loans.filter((l) => l.userId === user.id) : [],
     reservations: staff ? data.reservations : user ? data.reservations.filter((r) => r.userId === user.id) : [],
+    readingAccesses: staff ? data.readingAccesses : user ? data.readingAccesses.filter((x) => x.userId === user.id) : [],
     receipts: staff ? data.receipts : user ? data.receipts.filter((r) => r.userId === user.id) : [],
     transactions: staff ? data.transactions : user ? data.transactions.filter((t) => t.userId === user.id) : [],
     users: staff ? data.users.map(publicUser) : [],
@@ -711,6 +713,7 @@ export const createApiRouter = (): Router => {
     wrap((req, res) => {
       const admin = requireStaff(req);
       const input = parseBookInput(req.body || {});
+      let newBookId = '';
       mutate((data) => {
         if (data.books.some((bk) => normalizeIsbn(bk.isbn) === normalizeIsbn(input.isbn))) {
           fail(409, 'Un livre avec cet ISBN existe déjà dans le catalogue.');
@@ -725,9 +728,10 @@ export const createApiRouter = (): Router => {
           reviewsCount: 1,
         };
         data.books.unshift(book);
+        newBookId = book.id;
         logActivity(data, admin, 'Ajout de Livre', book.title, `ISBN ${book.isbn}, Stock: ${book.stockTotal}`, req);
       });
-      respondState(req, res);
+      respondState(req, res, { bookId: newBookId });
     })
   );
 
@@ -810,6 +814,177 @@ export const createApiRouter = (): Router => {
     data.loans.unshift(loan);
     return loan;
   };
+
+  // ------------------------------------------------------
+  // Lecture en ligne : contenu (PDF) déposé par l'administration, lu depuis le site, sans téléchargement
+  // ------------------------------------------------------
+  const MAX_CONTENT_BYTES = 30 * 1024 * 1024;
+  const assertBookId = (id: string): string => {
+    if (!/^[\w-]{1,80}$/.test(id)) fail(400, 'Identifiant de livre invalide.');
+    return id;
+  };
+
+  router.put(
+    '/books/:id/content',
+    express.raw({ type: 'application/pdf', limit: MAX_CONTENT_BYTES }),
+    wrap((req, res) => {
+      const admin = requireStaff(req);
+      const id = assertBookId(String(req.params.id));
+      const buf = req.body;
+      if (!Buffer.isBuffer(buf) || buf.length === 0) fail(400, 'Aucun fichier PDF reçu.');
+      if ((buf as Buffer).subarray(0, 5).toString('latin1') !== '%PDF-') fail(400, 'Le fichier n\'est pas un PDF valide.');
+      mutate((data) => {
+        const book = data.books.find((bk) => bk.id === id) ?? fail(404, 'Livre introuvable.');
+        fs.mkdirSync(CONTENT_DIR, { recursive: true });
+        const tmp = `${contentPath(id)}.tmp`;
+        fs.writeFileSync(tmp, buf as Buffer);
+        fs.renameSync(tmp, contentPath(id));
+        book.hasDigitalContent = true;
+        logActivity(data, admin, 'Contenu Numérique', book.title, `PDF déposé (${Math.round((buf as Buffer).length / 1024)} Ko)`, req);
+      });
+      respondState(req, res);
+    })
+  );
+
+  router.delete(
+    '/books/:id/content',
+    wrap((req, res) => {
+      const admin = requireStaff(req);
+      const id = assertBookId(String(req.params.id));
+      mutate((data) => {
+        const book = data.books.find((bk) => bk.id === id) ?? fail(404, 'Livre introuvable.');
+        const readers = data.readingAccesses.filter((x) => x.bookId === id && x.status === 'active').length;
+        if (readers > 0) {
+          fail(409, `Suppression impossible : ${readers} lecteur(s) ont un accès en cours (payé) à ce livre.`);
+        }
+        fs.rmSync(contentPath(id), { force: true });
+        book.hasDigitalContent = false;
+        logActivity(data, admin, 'Contenu Numérique', book.title, 'Contenu en ligne supprimé', req);
+      });
+      respondState(req, res);
+    })
+  );
+
+  /** Flux du PDF : réservé aux lecteurs ayant payé un accès encore valide (et au personnel). Jamais mis en cache. */
+  router.get(
+    '/books/:id/content',
+    wrap((req, res) => {
+      const user = requireAuth(req);
+      const id = assertBookId(String(req.params.id));
+      const data = read();
+      if (!data.books.some((bk) => bk.id === id)) fail(404, 'Livre introuvable.');
+      if (!isStaff(user)) {
+        const ok = data.readingAccesses.some(
+          (x) => x.userId === user.id && x.bookId === id && x.status === 'active' && new Date(x.expiresAt).getTime() > Date.now()
+        );
+        if (!ok) fail(403, 'Votre accès à la lecture a expiré ou n\'a pas été payé.');
+      }
+      const file = contentPath(id);
+      if (!fs.existsSync(file)) fail(404, 'Le contenu de ce livre n\'est pas disponible.');
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Length', String(fs.statSync(file).size));
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Content-Disposition', 'inline');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      fs.createReadStream(file).pipe(res);
+    })
+  );
+
+  /** Achat d'un droit de lecture : même prix que la réservation, valable 7 jours à compter du paiement. */
+  router.post(
+    '/reading',
+    wrapAsync(async (req, res) => {
+      const user = requireAuth(req);
+      const bookId = clean(req.body?.bookId, 80, { min: 1, label: 'Livre' });
+      let price = 0;
+      let accessId = '';
+      let bookTitle = '';
+
+      mutate((data) => {
+        const me = data.users.find((u) => u.id === user.id)!;
+        if (me.status === 'suspendu') fail(403, 'Votre compte est suspendu. Contactez l\'administration de la bibliothèque.');
+        const book = data.books.find((b) => b.id === bookId && !b.isArchived) ?? fail(404, 'Livre introuvable.');
+        if (!book.hasDigitalContent || !fs.existsSync(contentPath(book.id))) {
+          fail(409, 'Ce livre n\'est pas disponible en lecture en ligne.');
+        }
+        const now = Date.now();
+        const running = data.readingAccesses.find(
+          (x) => x.userId === me.id && x.bookId === book.id && x.status === 'active' && new Date(x.expiresAt).getTime() > now
+        );
+        if (running) fail(409, 'Vous avez déjà un accès en cours à ce livre : ouvrez-le depuis « Mes lectures ».');
+        // Un paiement abandonné ne bloque pas un nouvel essai
+        for (const x of data.readingAccesses) {
+          if (x.userId === me.id && x.bookId === book.id && x.status === 'en_attente_paiement') x.status = 'annulee';
+        }
+        price = Math.max(0, Math.round(book.reservationPrice ?? 0));
+        bookTitle = book.title;
+        const acc: ReadingAccess = {
+          id: newId('lec'),
+          reference: `LEC-${new Date().getFullYear()}-${nextCounter(data, 'lec', 4000)}`,
+          userId: me.id,
+          userName: me.name,
+          bookId: book.id,
+          bookTitle: book.title,
+          bookAuthor: book.author,
+          bookCover: book.coverUrl,
+          startedAt: new Date(now).toISOString(),
+          expiresAt: new Date(now + (price > 0 ? PAYMENT_HOLD_MINUTES * 60000 : READING_DAYS * 86400000)).toISOString(),
+          status: price > 0 ? 'en_attente_paiement' : 'active',
+          price,
+        };
+        data.readingAccesses.unshift(acc);
+        accessId = acc.id;
+        if (price === 0) {
+          logActivity(data, me, 'Lecture en ligne', acc.reference, `"${book.title}" — accès gratuit ${READING_DAYS} jours`, req);
+        }
+      });
+
+      if (price === 0) return respondState(req, res, { accessId, total: 0 });
+
+      // ---- Lecture payante : paiement Bachs obligatoire (même produit « prix personnalisé » que les réservations) ----
+      const cancelAccess = () =>
+        mutate((data) => {
+          const x = data.readingAccesses.find((r) => r.id === accessId);
+          if (x && x.status === 'en_attente_paiement') x.status = 'annulee';
+        });
+      if (!isBachsConfigured()) {
+        cancelAccess();
+        fail(503, 'Le paiement Bachs n\'est pas configuré sur le serveur : lecture en ligne impossible pour le moment.');
+      }
+      const transactionRef = `TX-${crypto.randomInt(10000000, 99999999)}`;
+      let session;
+      try {
+        session = await createCheckoutSession({
+          email: user.email,
+          localRef: transactionRef,
+          productId: reservationProduct(),
+          amount: toBachsAmount(price),
+        });
+      } catch (err) {
+        cancelAccess();
+        return fail(502, (err as Error).message);
+      }
+      mutate((data) => {
+        data.transactions.unshift({
+          id: newId('tx'),
+          transactionRef,
+          userId: user.id,
+          userName: user.name,
+          kind: 'lecture',
+          accessId,
+          amount: price,
+          currency: 'FCFA',
+          paymentMethod: 'Bachs',
+          status: 'en_attente',
+          externalId: session.id,
+          date: new Date().toISOString(),
+        });
+        logActivity(data, user, 'Paiement Initié', transactionRef, `Lecture en ligne « ${bookTitle} » — ${price} FCFA`, req);
+      });
+      respondState(req, res, { checkoutUrl: session.checkoutUrl, transactionRef, accessId, total: price });
+    })
+  );
 
   router.post(
     '/loans',
@@ -1107,6 +1282,34 @@ export const createApiRouter = (): Router => {
     const me = data.users.find((u) => u.id === tx.userId);
     if (!me) return null;
 
+    if (tx.kind === 'lecture') {
+      const acc = data.readingAccesses.find((x) => x.id === tx.accessId);
+      const book = acc && data.books.find((b) => b.id === acc.bookId);
+      tx.status = 'succes';
+      const alreadyReading =
+        !!acc &&
+        data.readingAccesses.some(
+          (x) => x.id !== acc.id && x.userId === acc.userId && x.bookId === acc.bookId && x.status === 'active' && new Date(x.expiresAt).getTime() > Date.now()
+        );
+      if (!acc || !book || !book.hasDigitalContent || alreadyReading) {
+        logActivity(data, me, 'Paiement à rembourser', tx.transactionRef, `Lecture en ligne indisponible après paiement (${acc?.bookTitle ?? 'livre inconnu'})`, req);
+        return null;
+      }
+      const now = Date.now();
+      acc.status = 'active';
+      acc.startedAt = new Date(now).toISOString();
+      acc.expiresAt = new Date(now + READING_DAYS * 86400000).toISOString();
+      const receipt = buildReceipt(
+        data,
+        'paiement',
+        me,
+        [{ bookId: acc.bookId, title: `Lecture en ligne : ${acc.bookTitle} (accès ${READING_DAYS} jours)`, author: `Règlement via ${tx.paymentMethod}`, isbn: `REF:${tx.transactionRef}` }],
+        { amountPaid: tx.amount, paymentMethod: tx.paymentMethod, expiresAt: acc.expiresAt, operatorName: 'Banque d\'Accueil & Comptabilité Universitaire' }
+      );
+      logActivity(data, me, 'Paiement Validé', tx.transactionRef, `Lecture en ligne « ${acc.bookTitle} » — ${tx.amount} FCFA via ${tx.paymentMethod}`, req);
+      return receipt;
+    }
+
     if (tx.kind === 'reservation') {
       const now = new Date();
       const items: Receipt['items'] = [];
@@ -1233,6 +1436,7 @@ export const createApiRouter = (): Router => {
       );
       let receipt: Receipt | null = null;
       let paidRef = '';
+      let paidKind = '';
       for (const tx of pending) {
         const outcome = await checkSession(tx.externalId!);
         if (outcome === 'pending') continue;
@@ -1242,16 +1446,21 @@ export const createApiRouter = (): Router => {
           if (outcome === 'paid') {
             receipt = settleTransaction(data, live, req);
             paidRef = live.transactionRef;
+            paidKind = live.kind ?? 'abonnement';
           } else {
             live.status = 'echec';
             for (const r of data.reservations) {
               if ((live.reservationIds ?? []).includes(r.id) && r.status === 'en_attente_paiement') r.status = 'annulee';
             }
+            if (live.accessId) {
+              const x = data.readingAccesses.find((r) => r.id === live.accessId);
+              if (x && x.status === 'en_attente_paiement') x.status = 'annulee';
+            }
             logActivity(data, user, 'Paiement Échoué', live.transactionRef, 'Session Bachs expirée ou annulée', req);
           }
         });
       }
-      respondState(req, res, { receipt, paidRef, pendingCount: read().transactions.filter((t) => t.userId === user.id && t.status === 'en_attente').length });
+      respondState(req, res, { receipt, paidRef, paidKind, pendingCount: read().transactions.filter((t) => t.userId === user.id && t.status === 'en_attente').length });
     })
   );
 

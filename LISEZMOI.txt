@@ -1,0 +1,8 @@
+Lecture en ligne ajoutee a libmanage-pro-main
+=============================================
+Apres avoir copie/extrait le projet :
+1. Lancez : npm install   (nouvelle dependance : pdfjs-dist ; bun.lock a ete retire car il ne correspond plus a package.json)
+2. Aucune nouvelle variable d'environnement : le paiement reutilise BACHS_API_KEY et BACHS_PRODUCT_RESERVATION.
+3. Connectez-vous en administrateur, ouvrez un livre (Ajouter / Modifier) et joignez son PDF (30 Mo max) :
+   c'est ce qui fait apparaitre « Lecture en ligne disponible » et le bouton « Lire en ligne » cote lecteur.
+4. En hebergement (Render...), data/contents/ (les PDF) doit etre sur un disque persistant (DATA_DIR), comme la base.

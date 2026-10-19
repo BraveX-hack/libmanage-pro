@@ -89,6 +89,11 @@ export const BookCard: React.FC<BookCardProps> = ({ book, onOpenDetails }) => {
           </h3>
 
           <p className="text-xs text-slate-600 mt-1 line-clamp-1">{book.author}</p>
+          {book.hasDigitalContent && (
+            <span className="inline-block mt-1 px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 text-[10px] font-semibold">
+              Lecture en ligne disponible
+            </span>
+          )}
           <p className="text-xs font-semibold text-amber-800 mt-1">
             Réservation : {(book.reservationPrice ?? 0) > 0 ? `${(book.reservationPrice ?? 0).toLocaleString('fr-FR')} FCFA` : 'Gratuite'}
           </p>

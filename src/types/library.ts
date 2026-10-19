@@ -40,7 +40,9 @@ export interface Book {
   summary: string;
   backCoverText: string;
   coverUrl: string;
-  reservationPrice?: number; // prix de la réservation en FCFA (0 = gratuit)
+  reservationPrice?: number; // prix de la réservation en FCFA (0 = gratuit) ; la lecture en ligne coûte le même prix
+  /** Vrai si l'administration a déposé le contenu (PDF) : lecture en ligne possible. Le fichier lui-même n'est jamais dans l'état public. */
+  hasDigitalContent?: boolean;
   stockTotal: number;
   stockAvailable: number;
   shelfLocation: string; // e.g. "Rayon INF-A04"
@@ -87,6 +89,23 @@ export interface Reservation {
   pickupDesk: string;
 }
 
+/** Droit de lire un livre en ligne (même prix que la réservation, valable 7 jours, sans téléchargement). */
+export interface ReadingAccess {
+  id: string;
+  reference: string; // e.g. "LEC-2026-4012"
+  userId: string;
+  userName: string;
+  bookId: string;
+  bookTitle: string;
+  bookAuthor: string;
+  bookCover: string;
+  startedAt: string;
+  /** Fin du droit de lecture (7 jours après le paiement). */
+  expiresAt: string;
+  status: 'en_attente_paiement' | 'active' | 'expiree' | 'annulee';
+  price: number;
+}
+
 export interface Receipt {
   id: string;
   receiptNumber: string; // e.g. "QUITT-2026-8942"
@@ -122,8 +141,10 @@ export interface PaymentTransaction {
   userId: string;
   userName: string;
   plan?: SubscriptionPlan;
-  kind?: 'abonnement' | 'reservation';
+  kind?: 'abonnement' | 'reservation' | 'lecture';
   reservationIds?: string[];
+  /** Droit de lecture en ligne payé par cette transaction. */
+  accessId?: string;
   amount: number;
   currency: string;
   paymentMethod: 'Bachs' | 'MTN MoMo' | 'Moov Money' | 'Wave' | 'Carte Bancaire';

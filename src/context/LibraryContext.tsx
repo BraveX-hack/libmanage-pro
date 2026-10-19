@@ -4,6 +4,7 @@ import {
   User,
   Loan,
   Reservation,
+  ReadingAccess,
   Receipt,
   ActivityLog,
   SubscriptionPlan,
@@ -27,9 +28,14 @@ interface LibraryContextType {
   books: Book[];
   loans: Loan[];
   reservations: Reservation[];
+  readingAccesses: ReadingAccess[];
   receipts: Receipt[];
   activityLogs: ActivityLog[];
   cart: string[];
+  /** Livre actuellement ouvert dans la liseuse (lecture en ligne). */
+  readerBookId: string | null;
+  openReader: (bookId: string) => void;
+  closeReader: () => void;
   activeReceipt: Receipt | null;
   toasts: ToastMessage[];
   transactions: PaymentTransaction[];
@@ -62,11 +68,17 @@ interface LibraryContextType {
   ) => Promise<{ success: boolean; ref?: string; checkoutUrl?: string; error?: string }>;
 
   // Books
-  addBook: (bookData: Omit<Book, 'id' | 'rating' | 'reviewsCount' | 'isArchived'>) => Promise<boolean>;
+  /** Renvoie l'identifiant du livre créé (ou null en cas d'échec). */
+  addBook: (bookData: Omit<Book, 'id' | 'rating' | 'reviewsCount' | 'isArchived'>) => Promise<string | null>;
   updateBook: (id: string, updates: Partial<Book>) => Promise<boolean>;
   archiveBook: (id: string) => Promise<{ success: boolean; error?: string }>;
   restoreBook: (id: string) => Promise<void>;
   uploadBookCover: (file: File) => Promise<string | null>;
+  uploadBookContent: (bookId: string, file: File) => Promise<boolean>;
+  removeBookContent: (bookId: string) => Promise<boolean>;
+
+  // Lecture en ligne (même prix que la réservation, 7 jours, sans téléchargement)
+  buyReading: (bookId: string) => Promise<ActionResult>;
 
   // Loans & Returns
   borrowBook: (bookId: string, durationDays?: number) => Promise<ActionResult>;
@@ -130,6 +142,7 @@ interface ServerState {
   books: Book[];
   loans: Loan[];
   reservations: Reservation[];
+  readingAccesses?: ReadingAccess[];
   receipts: Receipt[];
   transactions: PaymentTransaction[];
   users: PublicUser[];
@@ -169,6 +182,8 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [books, setBooks] = useState<Book[]>([]);
   const [loans, setLoans] = useState<Loan[]>([]);
   const [reservations, setReservations] = useState<Reservation[]>([]);
+  const [readingAccesses, setReadingAccesses] = useState<ReadingAccess[]>([]);
+  const [readerBookId, setReaderBookId] = useState<string | null>(null);
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [transactions, setTransactions] = useState<PaymentTransaction[]>([]);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
@@ -215,6 +230,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setBooks((state.books ?? []).map(withCover));
     setLoans((state.loans ?? []).map(withBookCover));
     setReservations((state.reservations ?? []).map(withBookCover));
+    setReadingAccesses(state.readingAccesses ?? []);
     setReceipts(state.receipts ?? []);
     setTransactions(state.transactions ?? []);
     setActivityLogs(state.activityLogs ?? []);
@@ -247,7 +263,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (res.data.receipt) {
           setActiveReceipt(res.data.receipt as Receipt);
           addToast(
-            (res.data.receipt as Receipt).type === 'reservation'
+            res.data.paidKind === 'lecture'
+              ? 'Paiement confirmé ! Vous pouvez lire le livre pendant 7 jours depuis « Mes lectures ».'
+              : (res.data.receipt as Receipt).type === 'reservation'
               ? 'Paiement confirmé ! Vos livres sont réservés pendant 4 jours.'
               : 'Paiement confirmé ! Votre formule est activée.',
             'success'
@@ -390,7 +408,7 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const addBook: LibraryContextType['addBook'] = async (bookData) => {
     const r = await run('POST', '/api/books', bookPayload(bookData));
     if (r.ok) addToast(`Livre "${bookData.title}" ajouté au catalogue.`, 'success');
-    return r.ok;
+    return r.ok ? ((r.data.bookId as string) || null) : null;
   };
 
   const updateBook: LibraryContextType['updateBook'] = async (id, updates) => {
@@ -425,6 +443,57 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       addToast((err as Error).message, 'error');
     }
     return null;
+  };
+
+  const MAX_CONTENT_MB = 30;
+
+  /** Envoie le PDF du livre (contenu lisible en ligne). Le fichier part tel quel, en binaire, vers le serveur. */
+  const uploadBookContent = async (bookId: string, file: File): Promise<boolean> => {
+    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+      addToast('Le contenu du livre doit être un fichier PDF.', 'error');
+      return false;
+    }
+    if (file.size > MAX_CONTENT_MB * 1024 * 1024) {
+      addToast(`PDF trop volumineux (${MAX_CONTENT_MB} Mo maximum).`, 'error');
+      return false;
+    }
+    try {
+      const res = await fetch(`/api/books/${encodeURIComponent(bookId)}/content`, {
+        method: 'PUT',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/pdf' },
+        body: file,
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok) {
+        if (data?.state) applyState(data.state as ServerState);
+        addToast('Contenu du livre enregistré : la lecture en ligne est activée.', 'success');
+        return true;
+      }
+      addToast(data?.error || "Échec de l'envoi du PDF.", 'error');
+    } catch {
+      addToast("Serveur injoignable pendant l'envoi du PDF.", 'error');
+    }
+    return false;
+  };
+
+  const removeBookContent = async (bookId: string): Promise<boolean> => {
+    const r = await run('DELETE', `/api/books/${encodeURIComponent(bookId)}/content`);
+    if (r.ok) addToast('Contenu en ligne supprimé.', 'info');
+    return r.ok;
+  };
+
+  // ---------- Lecture en ligne ----------
+  const buyReading: LibraryContextType['buyReading'] = async (bookId) => {
+    if (!currentUser) {
+      addToast('Connectez-vous pour lire ce livre en ligne.', 'warning');
+      return { success: false, error: 'Non authentifié' };
+    }
+    const r = await run('POST', '/api/reading', { bookId });
+    if (!r.ok) return { success: false, error: r.error };
+    if (r.data.checkoutUrl) return redirectToPayment(r.data.checkoutUrl as string);
+    addToast('Lecture activée gratuitement pour 7 jours. Bonne lecture !', 'success');
+    return { success: true };
   };
 
   // ---------- Prêts & retours ----------
@@ -582,6 +651,10 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         books,
         loans,
         reservations,
+        readingAccesses,
+        readerBookId,
+        openReader: setReaderBookId,
+        closeReader: () => setReaderBookId(null),
         receipts,
         activityLogs,
         cart,
@@ -600,6 +673,9 @@ export const LibraryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         archiveBook,
         restoreBook,
         uploadBookCover,
+        uploadBookContent,
+        removeBookContent,
+        buyReading,
         borrowBook,
         returnBook,
         renewLoan,

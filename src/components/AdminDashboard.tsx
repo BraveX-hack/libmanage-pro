@@ -41,6 +41,8 @@ export const AdminDashboard: React.FC = () => {
     archiveBook,
     restoreBook,
     uploadBookCover,
+    uploadBookContent,
+    removeBookContent,
     returnBook,
     pickupReservation,
     updateUserStatus,
@@ -80,6 +82,9 @@ export const AdminDashboard: React.FC = () => {
   const [formCoverUrl, setFormCoverUrl] = useState('');
   const [formPrice, setFormPrice] = useState(500);
   const [isUploadingCover, setIsUploadingCover] = useState(false);
+  /** PDF choisi dans le formulaire (contenu du livre, lisible en ligne) : envoyé à l'enregistrement. */
+  const [formContentFile, setFormContentFile] = useState<File | null>(null);
+  const [isSavingBook, setIsSavingBook] = useState(false);
 
   // Loan filters
   const [loanFilter, setLoanFilter] = useState<'all' | 'en_cours' | 'en_retard' | 'rendu'>('all');
@@ -141,6 +146,7 @@ export const AdminDashboard: React.FC = () => {
     setFormStockTotal(b.stockTotal);
     setFormCoverUrl(b.coverUrl);
     setFormPrice(b.reservationPrice ?? 0);
+    setFormContentFile(null);
     setIsAddBookModalOpen(true);
   };
 
@@ -164,8 +170,11 @@ export const AdminDashboard: React.FC = () => {
       return;
     }
 
+    setIsSavingBook(true);
     let saved = false;
+    let savedBookId: string | null = null;
     if (editingBook) {
+      savedBookId = editingBook.id;
       saved = await updateBook(editingBook.id, {
         title: formTitle,
         author: formAuthor,
@@ -182,7 +191,7 @@ export const AdminDashboard: React.FC = () => {
         coverUrl: formCoverUrl || editingBook.coverUrl,
       });
     } else {
-      saved = await addBook({
+      savedBookId = await addBook({
         title: formTitle,
         author: formAuthor,
         category: formCategory,
@@ -201,11 +210,22 @@ export const AdminDashboard: React.FC = () => {
           '/images/book-1.jpg',
         featured: false,
       });
+      saved = !!savedBookId;
     }
+
+    // Contenu du livre (PDF) : envoyé une fois la notice enregistrée
+    if (saved && savedBookId && formContentFile) {
+      const ok = await uploadBookContent(savedBookId, formContentFile);
+      if (!ok) {
+        addToast('La notice est enregistrée, mais le PDF n\'a pas pu être envoyé : rouvrez le livre pour réessayer.', 'warning');
+      }
+    }
+    setIsSavingBook(false);
 
     if (saved) {
       setIsAddBookModalOpen(false);
       setEditingBook(null);
+      setFormContentFile(null);
     }
   };
 
@@ -271,6 +291,7 @@ export const AdminDashboard: React.FC = () => {
               setFormStockTotal(4);
               setFormCoverUrl('');
               setFormPrice(500);
+              setFormContentFile(null);
               setIsAddBookModalOpen(true);
             }}
             className="px-4 py-2 text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 rounded-xl transition-colors flex items-center gap-1.5 shadow-xs"
@@ -573,6 +594,11 @@ export const AdminDashboard: React.FC = () => {
                             {book.title}
                           </div>
                           <div className="text-slate-500 text-[11px]">{book.author}</div>
+                          {book.hasDigitalContent && (
+                            <span className="inline-block mt-0.5 px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 text-[10px] font-semibold">
+                              Lecture en ligne
+                            </span>
+                          )}
                         </div>
                       </div>
                     </td>
@@ -1395,6 +1421,49 @@ export const AdminDashboard: React.FC = () => {
                 </div>
               </div>
 
+              <div className="p-4 rounded-xl border border-amber-200 bg-amber-50/60">
+                <label className="block font-semibold text-slate-800 mb-1 flex items-center gap-2">
+                  <BookOpen className="w-4 h-4 text-amber-700" />
+                  <span>Contenu du livre — lecture en ligne (PDF)</span>
+                </label>
+                <p className="text-[11px] text-slate-600 mb-3">
+                  Avec un PDF, le lecteur choisit : <strong>réserver</strong> le livre papier ou le <strong>lire en ligne</strong> au même prix ({formPrice > 0 ? `${formPrice.toLocaleString('fr-FR')} FCFA` : 'gratuit'}).
+                  La lecture se fait uniquement sur le site, sans téléchargement, pendant <strong>7 jours</strong> à compter du paiement.
+                </p>
+                {editingBook && books.find((b) => b.id === editingBook.id)?.hasDigitalContent && (
+                  <div className="mb-2 flex items-center justify-between gap-2 text-xs bg-white border border-emerald-200 rounded-lg px-3 py-2">
+                    <span className="text-emerald-800 font-semibold">✓ Un contenu est déjà en ligne pour ce livre (choisir un nouveau PDF le remplace).</span>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (window.confirm('Supprimer le contenu en ligne de ce livre ?')) await removeBookContent(editingBook.id);
+                      }}
+                      className="px-2.5 py-1 text-rose-700 border border-rose-200 rounded-md hover:bg-rose-50 shrink-0"
+                    >
+                      Supprimer le contenu
+                    </button>
+                  </div>
+                )}
+                <input
+                  type="file"
+                  accept="application/pdf,.pdf"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0] ?? null;
+                    if (f && f.size > 30 * 1024 * 1024) {
+                      addToast('PDF trop volumineux (30 Mo maximum).', 'error');
+                      e.target.value = '';
+                      setFormContentFile(null);
+                      return;
+                    }
+                    setFormContentFile(f);
+                  }}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-slate-900 bg-white"
+                />
+                <span className="text-[11px] text-slate-500 block mt-1">
+                  {formContentFile ? `Sélectionné : ${formContentFile.name} (${(formContentFile.size / 1048576).toFixed(1)} Mo)` : 'PDF, 30 Mo maximum. Facultatif : sans PDF, le livre reste en réservation seulement.'}
+                </span>
+              </div>
+
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Résumé synthétique</label>
                 <textarea
@@ -1427,9 +1496,10 @@ export const AdminDashboard: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-semibold rounded-lg transition-colors shadow-xs"
+                  disabled={isSavingBook}
+                  className="px-5 py-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white font-semibold rounded-lg transition-colors shadow-xs"
                 >
-                  {editingBook ? 'Enregistrer les Modifications' : 'Ajouter au Fonds Documentaire'}
+                  {isSavingBook ? 'Enregistrement…' : editingBook ? 'Enregistrer les Modifications' : 'Ajouter au Fonds Documentaire'}
                 </button>
               </div>
             </form>

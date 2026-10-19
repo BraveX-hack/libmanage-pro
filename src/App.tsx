@@ -20,12 +20,15 @@ import { Footer } from './components/Footer';
 import { Book, Receipt, SubscriptionPlan } from './types/library';
 
 // Console d'administration chargée à la demande (allège le premier chargement)
+// Liseuse (pdf.js, volumineux) chargée seulement à l'ouverture d'un livre
+const ReaderModal = lazy(() => import('./components/ReaderModal').then((m) => ({ default: m.ReaderModal })));
+
 const AdminDashboard = lazy(() =>
   import('./components/AdminDashboard').then((m) => ({ default: m.AdminDashboard }))
 );
 
 function MainApp() {
-  const { activeReceipt, setActiveReceipt, resetDemoData, currentUser, upgradeSubscription, addToast } = useLibrary();
+  const { activeReceipt, setActiveReceipt, resetDemoData, currentUser, upgradeSubscription, addToast, readerBookId } = useLibrary();
 
   const [currentTab, setCurrentTab] = useState<'accueil' | 'catalogue' | 'etudiant' | 'admin' | 'abonnements'>('accueil');
   const [catalogueSearchQuery, setCatalogueSearchQuery] = useState('');
@@ -189,6 +192,12 @@ function MainApp() {
         isOpen={isAuthOpen}
         onClose={() => setIsAuthOpen(false)}
       />
+
+      {readerBookId && (
+        <Suspense fallback={null}>
+          <ReaderModal />
+        </Suspense>
+      )}
 
       {/* Global Toast Notifications */}
       <ToastContainer />

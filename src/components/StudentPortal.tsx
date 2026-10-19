@@ -8,6 +8,10 @@ export const StudentPortal: React.FC = () => {
     currentUser,
     loans,
     reservations,
+    readingAccesses,
+    books,
+    openReader,
+    buyReading,
     renewLoan,
     cancelReservation,
     generateLoanReceipt,
@@ -16,7 +20,7 @@ export const StudentPortal: React.FC = () => {
     addToast,
   } = useLibrary();
 
-  const [activeTab, setActiveTab] = useState<'emprunts' | 'reservations' | 'historique' | 'demande'>('emprunts');
+  const [activeTab, setActiveTab] = useState<'emprunts' | 'reservations' | 'lectures' | 'historique' | 'demande'>('emprunts');
 
   // Book request form state
   const [requestTitle, setRequestTitle] = useState('');
@@ -43,6 +47,16 @@ export const StudentPortal: React.FC = () => {
   const userLoans = loans.filter((l) => l.userId === currentUser.id);
   const activeLoans = userLoans.filter((l) => l.status !== 'rendu');
   const pastLoans = userLoans.filter((l) => l.status === 'rendu');
+  const myAccesses = readingAccesses.filter((x) => x.userId === currentUser.id);
+  const isLive = (x: (typeof myAccesses)[number]) => x.status === 'active' && new Date(x.expiresAt).getTime() > Date.now();
+  const liveReadings = myAccesses.filter(isLive);
+  const otherReadings = myAccesses.filter((x) => !isLive(x) && (x.status === 'expiree' || x.status === 'en_attente_paiement')).slice(0, 6);
+  const timeLeft = (iso: string) => {
+    const ms = new Date(iso).getTime() - Date.now();
+    const d = Math.floor(ms / 86400000);
+    const h = Math.floor((ms % 86400000) / 3600000);
+    return `${d > 0 ? `${d} j ` : ''}${h} h`;
+  };
   const userReservations = reservations.filter((r) => r.userId === currentUser.id && r.status === 'active');
 
   // Calculate late days and fines
@@ -174,6 +188,18 @@ export const StudentPortal: React.FC = () => {
         >
           <Clock className="w-3.5 h-3.5" />
           <span>Réservations actives ({userReservations.length})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('lectures')}
+          className={`px-4 py-2 text-xs font-semibold rounded-lg transition-colors flex items-center gap-2 ${
+            activeTab === 'lectures'
+              ? 'bg-slate-900 text-white'
+              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+          }`}
+        >
+          <BookOpen className="w-3.5 h-3.5" />
+          <span>Mes lectures ({liveReadings.length})</span>
         </button>
 
         <button
@@ -371,6 +397,70 @@ export const StudentPortal: React.FC = () => {
                 </div>
               </div>
             ))
+          )}
+        </div>
+      )}
+
+      {/* Tab : lectures en ligne (7 jours, sans téléchargement) */}
+      {activeTab === 'lectures' && (
+        <div className="space-y-4">
+          {liveReadings.length === 0 && otherReadings.length === 0 ? (
+            <div className="p-12 text-center bg-white border border-slate-200 rounded-xl">
+              <BookOpen className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+              <p className="text-slate-700 font-medium text-sm">Aucune lecture en ligne</p>
+              <p className="text-xs text-slate-400 mt-1">
+                Les livres marqués « Lecture en ligne disponible » se lisent directement sur le site pendant 7 jours.
+              </p>
+            </div>
+          ) : (
+            <>
+              {liveReadings.map((x) => (
+                <div key={x.id} className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div className="flex items-start gap-4">
+                    <img
+                      src={books.find((b) => b.id === x.bookId)?.coverUrl || x.bookCover}
+                      alt={x.bookTitle}
+                      className="w-16 h-22 object-cover rounded-md border border-slate-200 shrink-0 bg-slate-100"
+                      referrerPolicy="no-referrer"
+                    />
+                    <div>
+                      <div className="text-[11px] font-mono text-slate-400 mb-1">RÉF : {x.reference} · Lecture en ligne</div>
+                      <h3 className="font-serif font-bold text-slate-900 text-base leading-snug">{x.bookTitle}</h3>
+                      <p className="text-xs text-slate-600 mt-0.5">{x.bookAuthor}</p>
+                      <div className="flex items-center gap-2 text-xs text-amber-800 font-semibold mt-2">
+                        <Clock className="w-3.5 h-3.5 text-amber-600" />
+                        <span>Il vous reste {timeLeft(x.expiresAt)} pour terminer ce livre</span>
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => openReader(x.bookId)}
+                    className="px-5 py-2.5 text-xs font-bold bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-lg transition-colors self-end md:self-center shrink-0 flex items-center gap-2"
+                  >
+                    <BookOpen className="w-4 h-4" />
+                    <span>Lire</span>
+                  </button>
+                </div>
+              ))}
+              {otherReadings.map((x) => (
+                <div key={x.id} className="bg-slate-50 border border-slate-200 rounded-xl p-4 flex items-center justify-between gap-3 text-xs">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-slate-700 truncate">{x.bookTitle}</div>
+                    <div className="text-slate-500">
+                      {x.status === 'en_attente_paiement' ? 'Paiement en attente de confirmation' : 'Accès terminé (7 jours écoulés)'}
+                    </div>
+                  </div>
+                  {x.status === 'expiree' && (
+                    <button
+                      onClick={() => buyReading(x.bookId)}
+                      className="px-3 py-1.5 font-semibold text-slate-700 border border-slate-300 rounded-lg hover:bg-white shrink-0"
+                    >
+                      Relire (nouveau paiement)
+                    </button>
+                  )}
+                </div>
+              ))}
+            </>
           )}
         </div>
       )}

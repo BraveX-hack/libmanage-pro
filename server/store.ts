@@ -7,6 +7,7 @@ import type {
   User,
   Loan,
   Reservation,
+  ReadingAccess,
   Receipt,
   ActivityLog,
   VisitorSession,
@@ -27,6 +28,10 @@ export const DATA_DIR = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
   : path.resolve(__dirname, '..', 'data');
 export const DB_FILE = path.join(DATA_DIR, 'database.json');
+/** Fichiers PDF des livres (jamais servis publiquement : lecture uniquement via /api/books/:id/content). */
+export const CONTENT_DIR = path.join(DATA_DIR, 'contents');
+export const READING_DAYS = 7;
+export const contentPath = (bookId: string) => path.join(CONTENT_DIR, `${bookId}.pdf`);
 
 /** Inscription en attente de confirmation par e-mail : le compte n'existe pas tant que le lien n'est pas cliqué. */
 export interface PendingRegistration {
@@ -50,6 +55,7 @@ export interface Database {
   books: Book[];
   loans: Loan[];
   reservations: Reservation[];
+  readingAccesses: ReadingAccess[];
   receipts: Receipt[];
   activityLogs: ActivityLog[];
   visitors: VisitorSession[];
@@ -65,6 +71,7 @@ const buildInitialDb = (): Database => ({
   books: structuredClone(INITIAL_BOOKS),
   loans: structuredClone(INITIAL_LOANS),
   reservations: structuredClone(INITIAL_RESERVATIONS),
+  readingAccesses: [],
   receipts: [],
   activityLogs: structuredClone(INITIAL_LOGS),
   visitors: [],
@@ -99,7 +106,7 @@ const backupExisting = (reason: string) => {
 const migrate = (data: Database): boolean => {
   let changed = false;
 
-  for (const key of ['users', 'books', 'loans', 'reservations', 'receipts', 'activityLogs', 'visitors', 'transactions', 'pendingRegistrations'] as const) {
+  for (const key of ['users', 'books', 'loans', 'reservations', 'readingAccesses', 'receipts', 'activityLogs', 'visitors', 'transactions', 'pendingRegistrations'] as const) {
     if (!Array.isArray(data[key])) {
       (data as any)[key] = [];
       changed = true;
@@ -133,6 +140,15 @@ const migrate = (data: Database): boolean => {
   for (const b of data.books) {
     if (typeof b.reservationPrice !== 'number') {
       b.reservationPrice = 500;
+      changed = true;
+    }
+  }
+
+  // Un livre n'est « lisible en ligne » que si son fichier existe réellement sur le disque
+  for (const b of data.books) {
+    const has = fs.existsSync(contentPath(b.id));
+    if (!!b.hasDigitalContent !== has) {
+      b.hasDigitalContent = has;
       changed = true;
     }
   }
@@ -208,6 +224,14 @@ export const sweep = (data: Database): boolean => {
         });
         data.activityLogs = data.activityLogs.slice(0, 500);
       }
+    }
+  }
+
+  // Lecture en ligne : le droit expire 7 jours après le paiement ; un paiement non confirmé à temps est abandonné
+  for (const acc of data.readingAccesses) {
+    if ((acc.status === 'active' || acc.status === 'en_attente_paiement') && new Date(acc.expiresAt).getTime() < now) {
+      acc.status = 'expiree';
+      changed = true;
     }
   }
 

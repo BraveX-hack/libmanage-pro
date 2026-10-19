@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Book } from '../types/library';
 import { useLibrary } from '../context/LibraryContext';
-import { X, BookOpen, Clock, MapPin, Calendar, Layers, ShieldCheck, Check, Bookmark, Star } from 'lucide-react';
+import { X, BookOpen, Clock, MapPin, Calendar, Layers, ShieldCheck, Check, Bookmark, Star, MonitorSmartphone } from 'lucide-react';
 import { BookCover } from './BookCover';
 
 interface BookModalProps {
@@ -10,12 +10,32 @@ interface BookModalProps {
 }
 
 export const BookModal: React.FC<BookModalProps> = ({ book, onClose }) => {
-  const { borrowBook, reserveBook, addToCart, cart, currentUser } = useLibrary();
+  const { borrowBook, reserveBook, addToCart, cart, currentUser, readingAccesses, buyReading, openReader } = useLibrary();
+  const [isBuyingReading, setIsBuyingReading] = useState(false);
   const [activeTab, setActiveTab] = useState<'details' | 'backCover'>('details');
 
   if (!book) return null;
 
   const isInCart = cart.includes(book.id);
+  const price = book.reservationPrice ?? 0;
+  const priceLabel = price > 0 ? `${price.toLocaleString('fr-FR')} FCFA` : 'Gratuit';
+  const activeAccess = readingAccesses.find(
+    (x) => x.bookId === book.id && x.userId === currentUser?.id && x.status === 'active' && new Date(x.expiresAt).getTime() > Date.now()
+  );
+  const msLeft = activeAccess ? new Date(activeAccess.expiresAt).getTime() - Date.now() : 0;
+
+  const handleRead = async () => {
+    if (activeAccess) {
+      openReader(book.id);
+      onClose();
+      return;
+    }
+    if (isBuyingReading) return;
+    setIsBuyingReading(true);
+    const res = await buyReading(book.id);
+    setIsBuyingReading(false);
+    if (res.success) onClose();
+  };
   const isAvailable = book.stockAvailable > 0;
 
   const handleBorrow = async () => {
@@ -163,6 +183,12 @@ export const BookModal: React.FC<BookModalProps> = ({ book, onClose }) => {
                     </strong>{' '}
                     (réglée en ligne via Bachs).
                   </li>
+                  {book.hasDigitalContent && (
+                    <li>
+                      <strong>Lecture en ligne</strong> : même prix ({priceLabel}), lecture sur le site uniquement (pas de téléchargement),
+                      <strong> 7 jours</strong> pour terminer à compter du paiement.
+                    </li>
+                  )}
                   <li>Un ticket de caisse officiel avec empreinte de sécurité est automatiquement délivré.</li>
                 </ul>
               </div>
@@ -177,7 +203,23 @@ export const BookModal: React.FC<BookModalProps> = ({ book, onClose }) => {
                 Fermer
               </button>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                {book.hasDigitalContent && (
+                  <button
+                    onClick={handleRead}
+                    disabled={isBuyingReading}
+                    className="px-5 py-2.5 text-xs font-semibold rounded-xl bg-amber-400 hover:bg-amber-300 disabled:opacity-60 text-slate-950 transition-all flex items-center gap-2 shadow-xs"
+                  >
+                    <MonitorSmartphone className="w-4 h-4" />
+                    <span>
+                      {activeAccess
+                        ? `Continuer la lecture (reste ${Math.floor(msLeft / 86400000) > 0 ? `${Math.floor(msLeft / 86400000)} j ` : ''}${Math.floor((msLeft % 86400000) / 3600000)} h)`
+                        : isBuyingReading
+                        ? 'Ouverture du paiement…'
+                        : `Lire en ligne — ${priceLabel} · 7 jours`}
+                    </span>
+                  </button>
+                )}
                 <button
                   onClick={() => addToCart(book.id)}
                   className={`px-5 py-2.5 text-xs font-semibold rounded-xl border transition-all flex items-center gap-2 shadow-xs ${
@@ -187,7 +229,7 @@ export const BookModal: React.FC<BookModalProps> = ({ book, onClose }) => {
                   }`}
                 >
                   {isInCart ? <Check className="w-4 h-4 text-emerald-600" /> : <Bookmark className="w-4 h-4 text-amber-400" />}
-                  <span>{isInCart ? '✓ Déjà dans le Panier' : 'Ajouter au Panier de Réservation'}</span>
+                  <span>{isInCart ? '✓ Déjà dans le Panier' : book.hasDigitalContent ? `Réserver le livre papier — ${priceLabel}` : 'Ajouter au Panier de Réservation'}</span>
                 </button>
               </div>
             </div>

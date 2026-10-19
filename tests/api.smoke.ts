@@ -382,6 +382,74 @@ async function main() {
     r = await adm.call('GET', '/api/database/download');
     check('admin : export sans mots de passe', r.status === 200 || r.json === null);
 
+    console.log('\nLecture en ligne (contenu PDF, 7 jours)');
+    const PDF = Buffer.from('%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n');
+    const rawCall = async (c: Client, method: string, url: string, body?: Buffer, type = 'application/pdf') => {
+      const res = await fetch(BASE + url, { method, headers: { ...(type ? { 'Content-Type': type } : {}), ...(c.cookie ? { Cookie: c.cookie } : {}) }, body: body as unknown as BodyInit });
+      const buf = Buffer.from(await res.arrayBuffer());
+      let json: any = null;
+      try { json = JSON.parse(buf.toString('utf-8')); } catch { /* binaire */ }
+      return { status: res.status, headers: res.headers, buf, json };
+    };
+    const readBooks = (await stu.call('GET', '/api/state')).json.books.filter((b: any) => !b.isArchived && b.reservationPrice > 0);
+    const readBook = readBooks[0];
+    const freeBook = readBooks[1];
+    const lateBook = readBooks[2];
+    const noPdfBook = readBooks[3];
+    check('aucun livre n\'a de contenu par défaut', readBooks.every((b: any) => !b.hasDigitalContent));
+    let rr = await rawCall(stu, 'PUT', `/api/books/${readBook.id}/content`, PDF);
+    check('étudiant : dépôt de contenu refusé', rr.status === 403);
+    rr = await rawCall(adm, 'PUT', `/api/books/${readBook.id}/content`, Buffer.from('pas un pdf du tout'));
+    check('faux PDF refusé (signature invalide)', rr.status === 400, rr.json);
+    rr = await rawCall(adm, 'PUT', `/api/books/${readBook.id}/content`, PDF, 'text/plain');
+    check('type de fichier non PDF refusé', rr.status === 400);
+    rr = await rawCall(adm, 'PUT', `/api/books/${readBook.id}/content`, PDF);
+    check('admin : PDF déposé, livre marqué « lisible en ligne »', rr.status === 200 && rr.json.state.books.find((b: any) => b.id === readBook.id).hasDigitalContent === true, rr.json);
+    check('le contenu n\'apparaît jamais dans l\'état public', !JSON.stringify((await stu.call('GET', '/api/state')).json).includes('%PDF'));
+    for (const b of [freeBook, lateBook]) await rawCall(adm, 'PUT', `/api/books/${b.id}/content`, PDF);
+
+    rr = await rawCall(new Client(), 'GET', `/api/books/${readBook.id}/content`, undefined, '');
+    check('visiteur non connecté : lecture refusée (401)', rr.status === 401);
+    rr = await rawCall(stu, 'GET', `/api/books/${readBook.id}/content`, undefined, '');
+    check('lecteur sans paiement : lecture refusée (403)', rr.status === 403);
+    r = await stu.call('POST', '/api/reading', { bookId: noPdfBook.id });
+    check('livre sans contenu : lecture en ligne impossible', r.status === 409, r.json);
+
+    mockStatus = 'open';
+    r = await stu.call('POST', '/api/reading', { bookId: readBook.id });
+    check('lecture payante : lien Bachs renvoyé, pas encore d\'accès', r.status === 200 && !!r.json.checkoutUrl, r.json);
+    check('même prix que la réservation envoyé à Bachs (500.00)', mockLastBody?.product_cart?.[0]?.amount === '500.00', mockLastBody);
+    const pendingAcc = r.json.state.readingAccesses.find((x: any) => x.bookId === readBook.id);
+    check('accès « en attente de paiement »', pendingAcc?.status === 'en_attente_paiement', pendingAcc);
+    rr = await rawCall(stu, 'GET', `/api/books/${readBook.id}/content`, undefined, '');
+    check('paiement non confirmé : lecture toujours refusée', rr.status === 403);
+    mockStatus = 'complete';
+    r = await stu.call('POST', '/api/payments/verify', {});
+    const acc = r.json.state.readingAccesses.find((x: any) => x.bookId === readBook.id);
+    check('paiement confirmé : accès actif + quittance avec montant', acc?.status === 'active' && r.json.paidKind === 'lecture' && r.json.receipt?.amountPaid === 500, r.json.receipt);
+    const days = (new Date(acc.expiresAt).getTime() - Date.now()) / 86400000;
+    check('accès valable 7 jours', days > 6.99 && days <= 7.001, days);
+    mockStatus = 'open';
+    rr = await rawCall(stu, 'GET', `/api/books/${readBook.id}/content`, undefined, '');
+    check('lecteur ayant payé : PDF servi', rr.status === 200 && rr.buf.subarray(0, 5).toString() === '%PDF-');
+    check('jamais mis en cache, jamais en téléchargement', /no-store/.test(rr.headers.get('cache-control') || '') && rr.headers.get('content-disposition') === 'inline');
+    r = await stu.call('POST', '/api/reading', { bookId: readBook.id });
+    check('double achat pendant l\'accès refusé', r.status === 409, r.json);
+    r = await adm.call('DELETE', `/api/books/${readBook.id}/content`);
+    check('suppression du contenu refusée tant qu\'un lecteur a payé', r.status === 409, r.json);
+
+    r = await adm.call('PUT', `/api/books/${freeBook.id}`, { ...freeBook, reservationPrice: 0 });
+    check('admin : prix à 0 = lecture gratuite', r.status === 200);
+    r = await stu.call('POST', '/api/reading', { bookId: freeBook.id });
+    check('lecture gratuite : accès immédiat, sans paiement', r.status === 200 && !r.json.checkoutUrl && r.json.state.readingAccesses.some((x: any) => x.bookId === freeBook.id && x.status === 'active'), r.json);
+    rr = await rawCall(adm, 'GET', `/api/books/${freeBook.id}/content`, undefined, '');
+    check('bibliothécaire : aperçu du contenu autorisé', rr.status === 200);
+
+    // Contenu retiré quand personne ne lit
+    r = await adm.call('DELETE', `/api/books/${lateBook.id}/content`);
+    check('suppression du contenu autorisée sans lecteur actif', r.status === 200 && r.json.state.books.find((b: any) => b.id === lateBook.id).hasDigitalContent === false, r.json);
+    await rawCall(adm, 'PUT', `/api/books/${lateBook.id}/content`, PDF);
+
     console.log('\nRetards & expiration');
     const dbFile = path.join(dataDir, 'database.json');
     const db = JSON.parse(fs.readFileSync(dbFile, 'utf-8'));
@@ -395,6 +463,7 @@ async function main() {
     const heldElsewhere = db.loans.filter((l: any) => l.bookId === expBook.id && l.status !== 'rendu').length + db.reservations.filter((x: any) => x.bookId === expBook.id && x.status === 'active').length;
     db.reservations.unshift({ id: 'res-exp-test', reference: 'RES-TEST-EXP', userId: koffi.id, userName: koffi.name, bookId: expBook.id, bookTitle: expBook.title, bookAuthor: expBook.author, bookCover: expBook.coverUrl, isbn: expBook.isbn, reservedAt: new Date(Date.now() - 5 * 86400000).toISOString(), expiresAt: new Date(Date.now() - 1 * 86400000).toISOString(), status: 'active', pickupDesk: 'Guichet 2' });
     expBook.stockAvailable = expBook.stockTotal - heldElsewhere - 1;
+    db.readingAccesses.unshift({ id: 'lec-exp-test', reference: 'LEC-TEST-EXP', userId: meId.id, userName: meId.name, bookId: lateBook.id, bookTitle: lateBook.title, bookAuthor: lateBook.author, bookCover: lateBook.coverUrl, startedAt: new Date(Date.now() - 9 * 86400000).toISOString(), expiresAt: new Date(Date.now() - 2 * 86400000).toISOString(), status: 'active', price: 500 });
     fs.writeFileSync(dbFile, JSON.stringify(db));
     // Le serveur garde la base en mémoire : on redémarre pour simuler la relecture disque
     stopServer(server);
@@ -409,6 +478,14 @@ async function main() {
       check('réservation non retirée après 4 jours : expirée automatiquement', expired?.status === 'expiree', expired);
       check('le stock revient à la normale après expiration', s.books.find((b: any) => b.id === expBook.id).stockAvailable === expBook.stockTotal - heldElsewhere);
       check('expiration tracée dans le journal', s.activityLogs.some((l: any) => l.action === 'Expiration Réservation' && l.target === 'RES-TEST-EXP'));
+      check('lecture non terminée après 7 jours : accès expiré automatiquement', s.readingAccesses.find((x: any) => x.id === 'lec-exp-test')?.status === 'expiree');
+      check('le contenu reste en place après redémarrage (livre toujours lisible)', s.books.find((b: any) => b.id === lateBook.id).hasDigitalContent === true);
+      const stu2 = new Client();
+      await stu2.call('POST', '/api/auth/login', { email: 'test.etudiant@example.com', password: 'MotDePasse123' });
+      rr = await rawCall(stu2, 'GET', `/api/books/${lateBook.id}/content`, undefined, '');
+      check('accès expiré : PDF refusé (403)', rr.status === 403);
+      rr = await rawCall(stu2, 'GET', `/api/books/${readBook.id}/content`, undefined, '');
+      check('accès payé encore valide après redémarrage : PDF servi', rr.status === 200);
       r = await adm2.call('PUT', '/api/reservations/res-exp-test/pickup');
       check('retrait d\'une réservation expirée refusé', r.status === 409);
       const lateLoan = s.loans.find((l: any) => l.id === 'loan-late-test');
